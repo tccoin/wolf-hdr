@@ -68,6 +68,7 @@ enum Encoder {
   QUICKSYNC,
   SOFTWARE,
   APPLE,
+  VULKAN,
   UNKNOWN
 };
 

@@ -41,6 +41,8 @@ static Encoder encoder_type(const GstEncoder &settings) {
     return QUICKSYNC;
   case (utils::hash("applemedia")):
     return APPLE;
+  case (utils::hash("vulkan")):
+    return VULKAN;
   case (utils::hash("x264")):
   case (utils::hash("x265")):
   case (utils::hash("aom")):
@@ -301,7 +303,12 @@ Config load_or_default(const std::string &source,
   if (use_zero_copy) {
     switch (video_encoder) {
     case NVIDIA: {
-      default_base_video.producer_buffer_caps = "video/x-raw(memory:CUDAMemory)";
+      // Carry an NV12 DMABuf over the interpipe and import it into CUDA in the
+      // consumer (dmabuftocuda, see nvcodec video_params_zero_copy). A CUDAMemory
+      // buffer can't cross the interpipe -- it's tied to a CUDA context/stream the
+      // per-client encoder pipeline doesn't share -- so the producer must hand off
+      // the context-free dmabuf, exactly like the VAAPI path below.
+      default_base_video.producer_buffer_caps = "video/x-raw(memory:DMABuf), drm-format=NV12";
       break;
     }
     case VAAPI:
@@ -324,6 +331,14 @@ Config load_or_default(const std::string &source,
         default_base_video.producer_buffer_caps =
             fmt::format("video/x-raw(memory:DMABuf), drm-format={{{}}}", utils::join(gst_caps, ","));
       }
+      break;
+    }
+    case VULKAN: {
+      // Native Vulkan Video zero-copy: the producer (waylanddisplaysrc vulkan=true) emits an
+      // NV12 memory:VulkanImage that crosses the interpipe on a shared GstVulkanDevice (shared
+      // via the producer's bus_sync_handler / NeedContextData). vulkanh264enc consumes it
+      // directly -- no upload/convert.
+      default_base_video.producer_buffer_caps = "video/x-raw(memory:VulkanImage), format=NV12";
       break;
     }
     default: {

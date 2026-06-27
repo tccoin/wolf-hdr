@@ -95,9 +95,13 @@ void start_video_producer(const std::string &session_id,
                           std::shared_ptr<immer::atom<gst_video_context::gst_context_ptr>> video_context,
                           std::shared_ptr<boost::promise<WaylandDisplayReady>> on_ready,
                           std::shared_ptr<events::EventBusType> event_bus) {
-  auto pipeline = fmt::format("waylanddisplaysrc name=wolf_wayland_source render_node={render_node} ! "
+  // The native Vulkan zero-copy path needs the source in Vulkan mode so it emits NV12
+  // memory:VulkanImage (selected when the negotiated producer caps are VulkanImage).
+  std::string vulkan_prop = buffer_format.find("VulkanImage") != std::string::npos ? " vulkan=true" : "";
+  auto pipeline = fmt::format("waylanddisplaysrc name=wolf_wayland_source render_node={render_node}{vulkan_prop} ! "
                               "{buffer_format}, width={width}, height={height}, framerate={fps}/1 ! \n"    //
                               "interpipesink sync=true async=false name={session_id}_video max-buffers=1", //
+                              fmt::arg("vulkan_prop", vulkan_prop),
                               fmt::arg("buffer_format", buffer_format),
                               fmt::arg("render_node", render_node),
                               fmt::arg("session_id", session_id),
@@ -392,6 +396,11 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
       fmt::arg("min_required_fec_packets", video_session->min_required_fec_packets),
       fmt::arg("slices_per_frame", video_session->slices_per_frame),
       fmt::arg("vbv_buffer_size", video_session->bitrate_kbps / video_session->display_mode.refreshRate),
+      // Vulkan encoder tunables (defaults = low-latency streaming preset: fastest quality,
+      // single reference, no B-frames -> full VCN throughput). Override per-deployment via env.
+      fmt::arg("vk_quality", utils::get_env("WOLF_VULKAN_QUALITY", "0")),
+      fmt::arg("vk_ref_frames", utils::get_env("WOLF_VULKAN_REF_FRAMES", "1")),
+      fmt::arg("vk_b_frames", utils::get_env("WOLF_VULKAN_B_FRAMES", "0")),
       fmt::arg("color_space", color_space),
       fmt::arg("color_range", color_range),
       fmt::arg("host_port", video_session->port));

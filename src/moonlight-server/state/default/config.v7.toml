@@ -339,8 +339,14 @@ video/x-raw(memory:CUDAMemory), width={width}, height={height}, \
 chroma-site={color_range}, format=NV12, colorimetry={color_space}, pixel-aspect-ratio=1/1\
 """
 
+# Zero-copy carries an NV12 DMABuf over the interpipe (a CUDAMemory buffer can't
+# cross the interpipe boundary -- it's bound to a CUDA context/stream the consumer
+# pipeline doesn't share). dmabuftocuda imports that DMABuf into CUDA here in the
+# consumer (via EGLImage, no system-memory copy), where the encoder's CUDA context
+# is available; cudaupload can't (it has no DMABuf sink caps).
 video_params_zero_copy = """
-cudaupload !
+queue !
+dmabuftocuda !
 cudaconvertscale add-borders=true !
 video/x-raw(memory:CUDAMemory),format=NV12, width={width}, height={height}, pixel-aspect-ratio=1/1
 """
@@ -442,6 +448,26 @@ encoder_pipeline = """
 nvh264enc preset=low-latency-hq zerolatency=true gop-size=0 rc-mode=cbr-ld-hq bitrate={bitrate} vbv-buffer-size={vbv_buffer_size} aud=false !
 h264parse !
 video/x-h264, profile=main, stream-format=byte-stream\
+"""
+
+# Native Vulkan Video zero-copy encode (waylanddisplaysrc vulkan=true emits NV12 memory:VulkanImage).
+# Tunables come from WOLF_VULKAN_QUALITY / _REF_FRAMES / _B_FRAMES (defaults: low-latency streaming
+# preset = fastest quality, single reference, no B-frames -> full VCN throughput). Note: HEVC/AV1
+# Vulkan encode are not yet exposed by Mesa/RADV, so only H.264 is provided here.
+[[gstreamer.video.h264_encoders]]
+plugin_name = "vulkan"
+check_elements = ["vulkanh264enc"]
+encoder_pipeline = """
+vulkanh264enc aud=false quality={vk_quality} num-ref-frames={vk_ref_frames} b-frames={vk_b_frames} bitrate={bitrate} rate-control=cbr min-qp=20 idr-period=1024 !
+h264parse !
+video/x-h264, profile=main, stream-format=byte-stream\
+"""
+# The producer (waylanddisplaysrc vulkan=true) already emits NV12 memory:VulkanImage at the
+# session resolution/framerate, so the zero-copy path needs no videoscale/videoconvert/videorate
+# -- those are CPU elements that cannot negotiate the VulkanImage memory feature (the default
+# zero-copy params would inject them and fail with not-negotiated). Just a decoupling queue.
+video_params_zero_copy = """
+queue\
 """
 
 [[gstreamer.video.h264_encoders]]
