@@ -342,10 +342,9 @@ Config load_or_default(const std::string &source,
       // [gstreamer.video] hdr = true selects the 10-bit P010 producer format, which
       // (via the hdr=true producer prop and vulkanh265enc's Main-10 + HDR10 SEI path)
       // yields an HDR10 stream. Default 8-bit NV12 so SDR clients aren't mis-signaled.
-      default_base_video.producer_buffer_caps =
-          default_gst_video_settings.hdr
-              ? "video/x-raw(memory:VulkanImage), format=P010_10LE"
-              : "video/x-raw(memory:VulkanImage), format=NV12";
+      default_base_video.producer_buffer_caps = default_gst_video_settings.hdr
+                                                    ? "video/x-raw(memory:VulkanImage), format=P010_10LE"
+                                                    : "video/x-raw(memory:VulkanImage), format=NV12";
       break;
     }
     default: {

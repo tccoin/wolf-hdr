@@ -102,17 +102,18 @@ void start_video_producer(const std::string &session_id,
   // BT.2020 PQ-tagged frames (mastering-display + content-light metadata) so the
   // downstream vulkanh265enc produces an HDR10 Main-10 stream.
   std::string hdr_prop = buffer_format.find("P010") != std::string::npos ? " hdr=true" : "";
-  auto pipeline = fmt::format("waylanddisplaysrc name=wolf_wayland_source render_node={render_node}{vulkan_prop}{hdr_prop} ! "
-                              "{buffer_format}, width={width}, height={height}, framerate={fps}/1 ! \n"    //
-                              "interpipesink sync=true async=false name={session_id}_video max-buffers=1", //
-                              fmt::arg("vulkan_prop", vulkan_prop),
-                              fmt::arg("hdr_prop", hdr_prop),
-                              fmt::arg("buffer_format", buffer_format),
-                              fmt::arg("render_node", render_node),
-                              fmt::arg("session_id", session_id),
-                              fmt::arg("width", display_mode.width),
-                              fmt::arg("height", display_mode.height),
-                              fmt::arg("fps", display_mode.refreshRate));
+  auto pipeline = fmt::format(
+      "waylanddisplaysrc name=wolf_wayland_source render_node={render_node}{vulkan_prop}{hdr_prop} ! "
+      "{buffer_format}, width={width}, height={height}, framerate={fps}/1 ! \n"    //
+      "interpipesink sync=true async=false name={session_id}_video max-buffers=1", //
+      fmt::arg("vulkan_prop", vulkan_prop),
+      fmt::arg("hdr_prop", hdr_prop),
+      fmt::arg("buffer_format", buffer_format),
+      fmt::arg("render_node", render_node),
+      fmt::arg("session_id", session_id),
+      fmt::arg("width", display_mode.width),
+      fmt::arg("height", display_mode.height),
+      fmt::arg("fps", display_mode.refreshRate));
   logs::log(logs::debug, "[GSTREAMER] Starting video producer: {}", pipeline);
   auto bus_data_ptr =
       std::make_shared<GstBusData>(GstBusData{.on_ready = std::move(on_ready), .wayland_plugin = nullptr});
