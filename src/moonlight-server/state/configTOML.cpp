@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include <events/events.hpp>
 #include <events/reflectors.hpp>
 #include <fstream>
@@ -351,6 +352,23 @@ Config load_or_default(const std::string &source,
             use_zero_copy ? "zero copy" : "legacy",
             get_vendor_name(vendor),
             default_gst_render_node);
+
+  bool using_vulkan_encoder = encoder_type(*h264_encoder) == VULKAN ||
+                              (hevc_encoder && encoder_type(*hevc_encoder) == VULKAN) ||
+                              (av1_encoder && encoder_type(*av1_encoder) == VULKAN);
+  if (vendor == GPU_VENDOR::AMD && using_vulkan_encoder) {
+    // The Vulkan Video encoder runs inside this process, so RADV's low-latency encode mode (Mesa 26.1+) has to be
+    // enabled on Wolf's own environment. Don't override a RADV_PERFTEST that the user already set.
+    if (!utils::get_env("RADV_PERFTEST")) {
+      setenv("RADV_PERFTEST", "lowlatencyenc", 0);
+      logs::log(logs::info,
+                "AMD GPU with a Vulkan Video encoder detected, enabling RADV_PERFTEST=lowlatencyenc for low-latency "
+                "encoding (requires Mesa 26.1+, silently ignored on older Mesa). Set RADV_PERFTEST yourself to "
+                "override this.");
+    } else {
+      logs::log(logs::debug, "RADV_PERFTEST already set ({}), leaving it as-is", utils::get_env("RADV_PERFTEST"));
+    }
+  }
 
   default_base_video.h264_encoder = h264_encoder.value().encoder_pipeline;
   if (hevc_encoder) {
