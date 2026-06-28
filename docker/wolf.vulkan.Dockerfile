@@ -27,6 +27,13 @@ RUN dnf install -y \
 # gst (incl. the gst-wayland-display .pc/.a/.so) is under /opt/gst; the base image
 # already exports PKG_CONFIG_PATH / GST_PLUGIN_PATH / LD_LIBRARY_PATH for it, so
 # Wolf's CMake finds gstreamer-1.0 and the statically-linked gstwaylanddisplay there.
+
+# Cache-bust: force a clean recompile on the freshly-published base
+# (gst-wayland-display:vulkan carrying the producer P010+HDR + encoder HDR SEI +
+# vulkanh265enc.patch). Bump the value to invalidate the build cache.
+ARG WOLF_VULKAN_CACHEBUST=2026-06-28-hdr-1
+RUN echo "rebuild on fresh base: ${WOLF_VULKAN_CACHEBUST}"
+
 COPY . /wolf/
 WORKDIR /wolf
 
