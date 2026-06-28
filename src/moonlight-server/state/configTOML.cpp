@@ -339,11 +339,11 @@ Config load_or_default(const std::string &source,
       // NV12 memory:VulkanImage that crosses the interpipe on a shared GstVulkanDevice (shared
       // via the producer's bus_sync_handler / NeedContextData). vulkanh264enc consumes it
       // directly -- no upload/convert.
-      // WOLF_HDR=TRUE selects the 10-bit P010 producer format, which (via the hdr=true
-      // producer prop and vulkanh265enc's Main-10 + HDR10 SEI path) yields an HDR10 stream.
-      // Default stays 8-bit NV12 so SDR clients are never mis-signaled as HDR.
+      // [gstreamer.video] hdr = true selects the 10-bit P010 producer format, which
+      // (via the hdr=true producer prop and vulkanh265enc's Main-10 + HDR10 SEI path)
+      // yields an HDR10 stream. Default 8-bit NV12 so SDR clients aren't mis-signaled.
       default_base_video.producer_buffer_caps =
-          utils::get_env("WOLF_HDR", "") == std::string("TRUE")
+          default_gst_video_settings.hdr
               ? "video/x-raw(memory:VulkanImage), format=P010_10LE"
               : "video/x-raw(memory:VulkanImage), format=NV12";
       break;

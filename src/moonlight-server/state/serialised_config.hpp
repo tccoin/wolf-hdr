@@ -65,6 +65,11 @@ struct GstVideoCfg {
   std::string default_sink;
   std::map<std::string, GstEncoderDefault> defaults;
 
+  // When true, the native Vulkan zero-copy HEVC path uses a 10-bit P010 producer
+  // format with BT.2020/PQ tagging, so vulkanh265enc emits an HDR10 Main-10 stream.
+  // Default false (8-bit SDR NV12) so SDR clients are never mis-signaled as HDR.
+  bool hdr = false;
+
   std::vector<GstEncoder> av1_encoders;
   std::vector<GstEncoder> hevc_encoders;
   std::vector<GstEncoder> h264_encoders;
