@@ -377,7 +377,14 @@ Config load_or_default(const std::string &source,
 
   default_base_video.h264_encoder = h264_encoder.value().encoder_pipeline;
   if (hevc_encoder) {
-    default_base_video.hevc_encoder = hevc_encoder.value().encoder_pipeline;
+    auto hevc_pipeline = hevc_encoder.value().encoder_pipeline;
+    if (default_gst_video_settings.hdr && encoder_type(*hevc_encoder) == VULKAN) {
+      // The 10-bit P010 producer makes vulkanh265enc emit Main-10; the downstream
+      // capsfilter must allow it. An 8-bit `profile=main` constraint rejects the
+      // P010 input with "No valid profile found" -> not-negotiated -> no video.
+      hevc_pipeline = std::regex_replace(hevc_pipeline, std::regex("profile=main,"), "profile=main-10,");
+    }
+    default_base_video.hevc_encoder = hevc_pipeline;
   } else {
     logs::log(logs::warning, "Unable to find an HEVC encoder, disabling it");
   }
@@ -441,6 +448,7 @@ Config load_or_default(const std::string &source,
                 .config_source = source,
                 .support_hevc = hevc_encoder.has_value(),
                 .support_av1 = av1_encoder.has_value() && encoder_type(*av1_encoder) != SOFTWARE,
+                .support_hdr = default_gst_video_settings.hdr && hevc_encoder.has_value(),
                 .paired_clients = clients_atom,
                 .profiles = profiles_atom};
 }
