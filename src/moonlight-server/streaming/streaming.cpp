@@ -98,10 +98,15 @@ void start_video_producer(const std::string &session_id,
   // The native Vulkan zero-copy path needs the source in Vulkan mode so it emits NV12
   // memory:VulkanImage (selected when the negotiated producer caps are VulkanImage).
   std::string vulkan_prop = buffer_format.find("VulkanImage") != std::string::npos ? " vulkan=true" : "";
-  auto pipeline = fmt::format("waylanddisplaysrc name=wolf_wayland_source render_node={render_node}{vulkan_prop} ! "
+  // A P010 producer format selects the 10-bit / HDR path: tell the source to emit
+  // BT.2020 PQ-tagged frames (mastering-display + content-light metadata) so the
+  // downstream vulkanh265enc produces an HDR10 Main-10 stream.
+  std::string hdr_prop = buffer_format.find("P010") != std::string::npos ? " hdr=true" : "";
+  auto pipeline = fmt::format("waylanddisplaysrc name=wolf_wayland_source render_node={render_node}{vulkan_prop}{hdr_prop} ! "
                               "{buffer_format}, width={width}, height={height}, framerate={fps}/1 ! \n"    //
                               "interpipesink sync=true async=false name={session_id}_video max-buffers=1", //
                               fmt::arg("vulkan_prop", vulkan_prop),
+                              fmt::arg("hdr_prop", hdr_prop),
                               fmt::arg("buffer_format", buffer_format),
                               fmt::arg("render_node", render_node),
                               fmt::arg("session_id", session_id),
