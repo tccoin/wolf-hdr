@@ -375,6 +375,13 @@ Config load_or_default(const std::string &source,
     }
   }
 
+  if (default_gst_video_settings.hdr) {
+    // Plumb the SDR reference-white level to the producer's BT.2020/PQ shader (a
+    // specialization constant) so SDR content is tone-mapped to the configured nits
+    // instead of being stretched to PQ peak. Read by waylanddisplaysrc at converter build.
+    setenv("WOLF_SDR_REFERENCE_WHITE", std::to_string(default_gst_video_settings.sdr_reference_white).c_str(), 1);
+  }
+
   default_base_video.h264_encoder = h264_encoder.value().encoder_pipeline;
   if (hevc_encoder) {
     auto hevc_pipeline = hevc_encoder.value().encoder_pipeline;
