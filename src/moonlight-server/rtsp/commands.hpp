@@ -194,15 +194,19 @@ announce(const RTSP_PACKET &req, const events::StreamSession &session) {
   // block when a dimension isn't a multiple of the 64px CTB (every standard
   // height: 1080/720/2160). Round the stream up to whole CTBs so the encoder
   // only sees full blocks; the client scales the slightly-larger frame back to
-  // its viewport. Scoped to the vulkanh265enc pipeline so other encoders (which
-  // handle partial blocks fine) keep their exact requested resolution.
-  if (gst_pipeline.find("vulkanh265enc") != std::string::npos) {
+  // its viewport. This MUST match the compositor rounding applied at /launch for
+  // the Vulkan producer (rest/endpoints.hpp) -- the producer fills the compositor
+  // resolution, so an unrounded encoder would read uninitialised rows (green bar).
+  // Applied to both Vulkan encoders (h264 is CTB-immune but still shares the rounded
+  // Vulkan compositor, so its encode dimension has to agree).
+  if (gst_pipeline.find("vulkanh265enc") != std::string::npos ||
+      gst_pipeline.find("vulkanh264enc") != std::string::npos) {
     auto round_up_64 = [](int v) { return (v + 63) & ~63; };
     auto aligned_w = round_up_64(display.width);
     auto aligned_h = round_up_64(display.height);
     if (aligned_w != display.width || aligned_h != display.height) {
       logs::log(logs::info,
-                "[RTSP] vulkanh265enc: rounding {}x{} up to {}x{} (64px CTB alignment)",
+                "[RTSP] vulkan encoder: rounding {}x{} up to {}x{} (64px CTB alignment)",
                 display.width,
                 display.height,
                 aligned_w,
