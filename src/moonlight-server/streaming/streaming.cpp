@@ -10,6 +10,7 @@
 #include <immer/array.hpp>
 #include <immer/box.hpp>
 #include <memory>
+#include <optional>
 #include <streaming/streaming.hpp>
 #include <thread>
 
@@ -21,6 +22,11 @@ using namespace wolf::core;
 struct GstBusData {
   std::shared_ptr<boost::promise<WaylandDisplayReady>> on_ready;
   gst_element_ptr wayland_plugin;
+  // Used to forward the producer's HDR<->SDR content-state changes to the control thread.
+  std::string session_id;
+  std::shared_ptr<events::EventBusType> event_bus;
+  // Last HDR state we forwarded; guards against re-sending HDR_MODE on no-op messages.
+  std::optional<bool> last_hdr_state;
 };
 
 gboolean structure_each(GQuark field_id, const GValue *value, gpointer user_data) {
@@ -46,6 +52,29 @@ static void application_message_handler(GstBus *bus, GstMessage *msg, gpointer d
   auto structure = gst_message_get_structure(msg);
   if (gst_structure_has_name(structure, "wayland.src")) {
     gst_structure_foreach(structure, structure_each, data);
+  } else if (gst_structure_has_name(structure, "wolf-hdr-state")) {
+    // The producer pipeline signals an HDR<->SDR content change by posting a
+    // "wolf-hdr-state" application message carrying a single "hdr" gboolean.
+    // Forward it to the control thread so it can send the Moonlight HDR_MODE packet.
+    auto bus_data = static_cast<GstBusData *>(data);
+    gboolean hdr = FALSE;
+    if (!gst_structure_get_boolean(structure, "hdr", &hdr)) {
+      logs::log(logs::warning, "[HDR] Received wolf-hdr-state message without a valid 'hdr' boolean");
+      return;
+    }
+    bool enable = hdr == TRUE;
+    if (bus_data->last_hdr_state && *bus_data->last_hdr_state == enable) {
+      return; // Only react to actual changes.
+    }
+    bus_data->last_hdr_state = enable;
+    logs::log(logs::info, "[HDR] Content switched to {} for session {}", enable ? "HDR" : "SDR", bus_data->session_id);
+    try {
+      auto session_id = std::stoull(bus_data->session_id);
+      bus_data->event_bus->fire_event(
+          immer::box<events::HDRModeEvent>(events::HDRModeEvent{.session_id = session_id, .enable_hdr = enable}));
+    } catch (const std::exception &e) {
+      logs::log(logs::warning, "[HDR] Failed to parse session id '{}': {}", bus_data->session_id, e.what());
+    }
   }
 }
 
@@ -115,8 +144,10 @@ void start_video_producer(const std::string &session_id,
       fmt::arg("height", display_mode.height),
       fmt::arg("fps", display_mode.refreshRate));
   logs::log(logs::debug, "[GSTREAMER] Starting video producer: {}", pipeline);
-  auto bus_data_ptr =
-      std::make_shared<GstBusData>(GstBusData{.on_ready = std::move(on_ready), .wayland_plugin = nullptr});
+  auto bus_data_ptr = std::make_shared<GstBusData>(GstBusData{.on_ready = std::move(on_ready),
+                                                              .wayland_plugin = nullptr,
+                                                              .session_id = session_id,
+                                                              .event_bus = event_bus});
   std::shared_ptr<NeedContextData> ctx_data_ptr =
       std::make_shared<NeedContextData>(NeedContextData{.device_path = render_node, .gst_context = video_context});
   run_pipeline(pipeline, [=](auto pipeline) {
