@@ -31,7 +31,7 @@ RUN dnf install -y \
 # Cache-bust: force a clean recompile on the freshly-published base
 # (gst-wayland-display:vulkan carrying the producer P010+HDR + encoder HDR SEI +
 # vulkanh265enc.patch). Bump the value to invalidate the build cache.
-ARG WOLF_VULKAN_CACHEBUST=2026-06-29-hdr-3-compositor-align
+ARG WOLF_VULKAN_CACHEBUST=2026-06-29-hdr-4-sdr-tonemap
 RUN echo "rebuild on fresh base: ${WOLF_VULKAN_CACHEBUST}"
 
 COPY . /wolf/
