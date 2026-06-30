@@ -84,6 +84,15 @@ RUN echo /opt/gst/lib64 > /etc/ld.so.conf.d/gst-vulkan.conf && ldconfig
 WORKDIR /wolf
 ENV WOLF_CFG_FOLDER=/etc/wolf/cfg
 
+# Disable the lavapipe (llvmpipe) Vulkan ICD process-wide. On mixed-GPU / software-fallback
+# hosts the Vulkan loader otherwise dlopen()s lavapipe during vkCreateInstance (both the
+# producer's modifier query AND the vulkanh26x encoder's gst.vulkan.instance), and its libLLVM
+# static init collides with the libLLVM already loaded by the mesa GLES renderer -> LLVM
+# "option registered more than once" -> abort/std::terminate. lavapipe can't do Vulkan video
+# encode anyway. Set at the image level (not just the producer's plugin_init) so it covers the
+# encoder's instance regardless of plugin load order. Honour an explicit override at run time.
+ENV VK_LOADER_DRIVERS_DISABLE="*lvp_icd*"
+
 COPY --from=wolf-builder /wolf/wolf /wolf/wolf
 COPY --from=wolf-builder /wolf/fake-udev /wolf/fake-udev
 
