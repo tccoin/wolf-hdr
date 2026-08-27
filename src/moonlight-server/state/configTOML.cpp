@@ -162,9 +162,10 @@ parse_apps(const std::vector<BaseApp> &apps,
         // Preserve the explicit VulkanImage -> vulkandownload fallback used
         // for NVIDIA NVENC HDR instead of collapsing it to native Vulkan caps.
         const bool uses_vulkan_download = producer_buffer_caps.find("vulkandownload") != std::string::npos;
+        const bool has_explicit_p010 = producer_buffer_caps.find("P010_10LE") != std::string::npos;
         if (support_hdr && producer_buffer_caps.find("memory:VulkanImage") != std::string::npos &&
-            !uses_vulkan_download) {
-          producer_buffer_caps = "video/x-raw(memory:VulkanImage), format=P010_10LE";
+            !uses_vulkan_download && !has_explicit_p010) {
+          producer_buffer_caps = "video/x-raw(memory:VulkanImage), format=P010_10LE, colorimetry=bt2100-pq";
         } else if (support_hdr && producer_buffer_caps.find("memory:DMABuf") != std::string::npos) {
           // DMA_DRM is required by waylanddisplaysrc/interpipe for a DRM-format
           // caps structure. Without it, the P010 source caps fail negotiation.
