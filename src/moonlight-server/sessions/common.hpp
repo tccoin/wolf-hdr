@@ -1,7 +1,9 @@
 #pragma once
 
 #include <chrono>
+#include <cerrno>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <string>
 #include <string_view>
@@ -69,6 +71,20 @@ inline bool wait_for_wayland_socket(std::string_view runtime_dir,
     logs::log(logs::error, "Wayland socket {} was never created", socket_path.string());
   }
 
+  return false;
+}
+
+inline bool make_wayland_socket_accessible(std::string_view runtime_dir,
+                                           const std::string &socket_name) {
+  auto socket_path = std::filesystem::path(runtime_dir) / socket_name;
+  if (chmod(socket_path.c_str(), 0666) == 0) {
+    return true;
+  }
+
+  logs::log(logs::error,
+            "Unable to make Wayland socket {} accessible to app containers: {}",
+            socket_path.string(),
+            std::strerror(errno));
   return false;
 }
 } // namespace wolf::core::sessions

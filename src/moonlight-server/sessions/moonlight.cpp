@@ -183,6 +183,15 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
             return;
           }
 
+          if (!make_wayland_socket_accessible(runtime_dir, ready.wayland_socket_name)) {
+            logs::log(logs::error,
+                      "[STREAM_SESSION] Wayland socket {} is not accessible to the runner",
+                      ready.wayland_socket_name);
+            session->event_bus->fire_event(
+                immer::box<events::StopStreamEvent>(events::StopStreamEvent{.session_id = session->session_id}));
+            return;
+          }
+
           logs::log(logs::debug, "[STREAM_SESSION] Start runner");
           session->event_bus->fire_event(immer::box<events::StartRunner>(
               events::StartRunner{.stop_stream_when_over = true,

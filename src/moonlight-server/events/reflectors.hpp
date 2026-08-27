@@ -90,6 +90,42 @@ template <> struct Reflector<events::App> {
   }
 };
 
+// Wolf UI sends hdr_output when it creates a lobby. Keep this explicit
+// reflector in sync with the public API so newer Wolf UI clients can talk to
+// older/custom Wolf builds without rejecting the complete video_settings
+// object as an unknown field.
+template <> struct Reflector<events::VideoSettings> {
+  struct ReflType {
+    int width;
+    int height;
+    int refresh_rate;
+    std::string wayland_render_node;
+    std::string runner_render_node;
+    std::string video_producer_buffer_caps;
+    bool hdr_output = false;
+  };
+
+  static ReflType from(const events::VideoSettings &v) {
+    return {.width = v.width,
+            .height = v.height,
+            .refresh_rate = v.refresh_rate,
+            .wayland_render_node = v.wayland_render_node,
+            .runner_render_node = v.runner_render_node,
+            .video_producer_buffer_caps = v.video_producer_buffer_caps,
+            .hdr_output = v.hdr_output};
+  }
+
+  static events::VideoSettings to(const ReflType &v) {
+    return {.width = v.width,
+            .height = v.height,
+            .refresh_rate = v.refresh_rate,
+            .wayland_render_node = v.wayland_render_node,
+            .runner_render_node = v.runner_render_node,
+            .video_producer_buffer_caps = v.video_producer_buffer_caps,
+            .hdr_output = v.hdr_output};
+  }
+};
+
 template <> struct Reflector<events::Profile> {
   struct ReflType {
     std::string name;

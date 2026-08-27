@@ -159,10 +159,16 @@ parse_apps(const std::vector<BaseApp> &apps,
         const bool support_hdr = app.support_hdr.value_or(default_support_hdr);
         auto producer_buffer_caps =
             app_video_settings.producer_buffer_caps.value_or(default_video_settings.producer_buffer_caps.value());
-        if (support_hdr && producer_buffer_caps.find("memory:VulkanImage") != std::string::npos) {
+        // Preserve the explicit VulkanImage -> vulkandownload fallback used
+        // for NVIDIA NVENC HDR instead of collapsing it to native Vulkan caps.
+        const bool uses_vulkan_download = producer_buffer_caps.find("vulkandownload") != std::string::npos;
+        if (support_hdr && producer_buffer_caps.find("memory:VulkanImage") != std::string::npos &&
+            !uses_vulkan_download) {
           producer_buffer_caps = "video/x-raw(memory:VulkanImage), format=P010_10LE";
         } else if (support_hdr && producer_buffer_caps.find("memory:DMABuf") != std::string::npos) {
-          producer_buffer_caps = "video/x-raw(memory:DMABuf), drm-format=P010";
+          // DMA_DRM is required by waylanddisplaysrc/interpipe for a DRM-format
+          // caps structure. Without it, the P010 source caps fail negotiation.
+          producer_buffer_caps = "video/x-raw(memory:DMABuf), format=DMA_DRM, drm-format=P010";
         }
 
         auto h264_gst_pipeline = fmt::format(
