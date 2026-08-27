@@ -171,10 +171,19 @@ parse_apps(const std::vector<BaseApp> &apps,
           producer_buffer_caps = "video/x-raw(memory:DMABuf), format=DMA_DRM, drm-format=P010";
         }
 
+        // Per-app video_params_zero_copy is needed when an app overrides the
+        // encoder plugin (for example NVENC). Without this selection the
+        // global Vulkan conversion path is paired with nvh264/nvh265enc and
+        // the pipeline fails with not-negotiated before sending any video.
+        const auto app_h264_video_params = app_video_settings.video_params_zero_copy.value_or(
+            app_video_settings.video_params.value_or(h264_video_params));
+        const auto app_hevc_video_params = app_video_settings.video_params_zero_copy.value_or(
+            app_video_settings.video_params.value_or(hevc_video_params));
+
         auto h264_gst_pipeline = fmt::format(
             "{} !\n{} !\n{} !\n{}", //
             app_video_settings.source.value_or(default_video_settings.source.value()),
-            app_video_settings.video_params.value_or(h264_video_params),
+            app_h264_video_params,
             app_video_settings.h264_encoder.value_or(default_video_settings.h264_encoder.value()),
             app_video_settings.sink.value_or(default_video_settings.sink.value()));
 
@@ -182,7 +191,7 @@ parse_apps(const std::vector<BaseApp> &apps,
             default_video_settings.hevc_encoder.has_value()
                 ? fmt::format("{} !\n{} !\n{} !\n{}", //
                               app_video_settings.source.value_or(default_video_settings.source.value()),
-                              app_video_settings.video_params.value_or(hevc_video_params),
+                              app_hevc_video_params,
                               app_video_settings.hevc_encoder.value_or(default_video_settings.hevc_encoder.value()),
                               app_video_settings.sink.value_or(default_video_settings.sink.value()))
                 : "";
