@@ -26,6 +26,7 @@ use smithay::{
 };
 
 use crate::comp::{ClientState, FocusTarget, State};
+use crate::wayland::handlers::color_management::surface_is_hdr;
 
 /// Whether `WOLF_HDR_CM` is set (read once). Gates the per-surface client-buffer-format
 /// logging below, which would otherwise be hot in the commit path.
@@ -163,11 +164,8 @@ impl CompositorHandler for State {
     }
 
     fn commit(&mut self, surface: &WlSurface) {
-        on_commit_buffer_handler::<Self>(surface);
-
         // WOLF_HDR_CM: read the just-committed dmabuf fourcc ONCE, here, BEFORE the
-        // window/popup commits below advance the surface's double-buffered state (which would
-        // consume current().buffer and make a later read return None -- that was the bug). One
+        // compositor handler consumes/advances the cached assignment. One
         // read drives both the diagnostic log and the per-frame PQ-passthrough decision.
         // gamescope presents ONE composited output surface whose buffer fourcc flips 8-bit
         // (Steam UI -> SDR) <-> 10-bit (HDR game -> already-PQ); the converter uses
@@ -176,14 +174,46 @@ impl CompositorHandler for State {
         // client dmabufs, so they don't perturb this.
         if hdr_cm_enabled() {
             log_client_buffer_fourcc(surface);
+            // gamescope may submit HDR through a fp16 compositor buffer, whose FourCC is
+            // not itself a PQ indicator. Prefer the explicit frog/wp color-management state
+            // when present, while retaining the FourCC fallback for gamescope builds that do
+            // not send the protocol metadata.
+            let declared_pq = surface_is_hdr(surface);
             if let Some(fourcc) = committed_dmabuf_fourcc(surface) {
-                let pq = is_pq_fourcc(fourcc);
-                if self.current_input_is_pq != pq {
+                let pq = declared_pq || is_pq_fourcc(fourcc);
+                let tracked_surface = self
+                    .current_input_surface
+                    .as_ref()
+                    .is_some_and(|tracked| tracked == surface);
+                if pq {
+                    self.current_input_surface = Some(surface.clone());
+                }
+                if self.current_input_is_pq != pq && (pq || tracked_surface) {
                     self.current_input_is_pq = pq;
                     tracing::info!("pq_passthrough -> {pq} (fourcc={fourcc:?})");
                 }
+                if !pq && tracked_surface {
+                    self.current_input_surface = None;
+                }
+            } else if !declared_pq {
+                // A color-management commit can carry a new SDR state without a new dmabuf.
+                // Only the surface that established PQ may clear it; unrelated popups must
+                // not disturb the active game's transport mode.
+                let tracked_surface = self
+                    .current_input_surface
+                    .as_ref()
+                    .is_some_and(|tracked| tracked == surface);
+                if tracked_surface {
+                    self.current_input_surface = None;
+                    if self.current_input_is_pq {
+                        self.current_input_is_pq = false;
+                        tracing::info!("pq_passthrough -> false (surface declared SDR)");
+                    }
+                }
             }
         }
+
+        on_commit_buffer_handler::<Self>(surface);
 
         if let Some(window) = self
             .space

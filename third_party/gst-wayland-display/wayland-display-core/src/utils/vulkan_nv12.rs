@@ -1568,13 +1568,14 @@ fn wolf_hdr_cm() -> bool {
 }
 
 /// The "normal" (`pq_passthrough = false`) converter shader. Under `WOLF_HDR_CM` on the fp16
-/// P010 path this is the BT.709-matrix `RGBA_TO_P010_SPV` (true SDR, no PQ) regardless of the
-/// negotiated caps `bt2020` flag, so the pipeline survives a mid-stream bt709<->bt2100-pq
-/// colorimetry flip without a rebuild; the per-frame PQ-passthrough pipeline handles already-PQ
-/// HDR content. With `WOLF_HDR_CM` unset this is exactly `PixFmt::shader` (caps-driven).
+/// P010 path this is the BT.2020/PQ shader: SDR sRGB frames must be tone-mapped into the stable
+/// HDR10/PQ transport, otherwise the receiver interprets ordinary SDR code values as PQ and the
+/// desktop/Steam UI becomes over-bright and over-saturated. Already-PQ HDR content uses the
+/// separate per-frame passthrough pipeline. With `WOLF_HDR_CM` unset this is exactly
+/// `PixFmt::shader` (caps-driven).
 fn normal_shader(fmt: PixFmt, bt2020: bool, fp16_input: bool) -> &'static [u8] {
     if wolf_hdr_cm() && fmt == PixFmt::P010 && fp16_input {
-        RGBA_TO_P010_SPV
+        RGBA_TO_P010_BT2020_SPV
     } else {
         fmt.shader(bt2020, fp16_input)
     }

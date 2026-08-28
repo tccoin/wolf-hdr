@@ -920,17 +920,17 @@ impl BaseSrcImpl for WaylandDisplaySrc {
         //   mastering-display-info: R:G:B:W chromaticity (x,y * 50000) + max:min luminance
         //                (* 10000 cd/m^2) -> BT.2020 primaries, 1000 nit / 0.0001 nit.
         //   content-light-level: MaxCLL:MaxFALL -> 1000 : 400.
-        // WOLF_HDR_CM: TRUE dynamic HDR. The stream stays P010/Main-10 always, but its
-        // colorimetry flips mid-stream between BT.2100 PQ (HDR content) and BT.709 (SDR
-        // content) following the live compositor HDR state (`hdr_active`, driven per-frame
-        // by `poll_hdr_state()` in `create()`). When the flag is unset this is byte-identical
-        // to the previous behaviour: the static `hdr` property alone governs the P010 caps.
+        // WOLF_HDR_CM: the stream is a stable HDR10/PQ transport contract. Do not flip the
+        // negotiated P010 caps between BT.2100 PQ and BT.709 when the active client surface
+        // changes: Wolf's downstream encoder is negotiated once per connection and a mid-stream
+        // caps flip causes repeated renegotiation, visible flicker, and often `not negotiated`.
+        // The Vulkan converter still chooses per frame between SDR->PQ and native-PQ passthrough
+        // using the compositor's surface format. SDR desktop/UI frames are therefore encoded as
+        // PQ at the configured reference white, while native HDR frames remain untouched.
+        // When WOLF_HDR_CM is unset this is byte-identical to the previous behaviour: the static
+        // `hdr` property alone governs the P010 caps.
         let hdr_cm = std::env::var("WOLF_HDR_CM").is_ok();
-        let hdr = if hdr_cm {
-            self.hdr_active.load(Ordering::Relaxed)
-        } else {
-            self.settings.lock().unwrap().hdr
-        };
+        let hdr = self.settings.lock().unwrap().hdr;
         const HDR_COLORIMETRY: &str = "bt2100-pq";
         const HDR_MASTERING: &str = "35400:14600:8500:39850:6550:2300:15635:16450:10000000:1";
         const HDR_CLL: &str = "1000:400";
@@ -1404,22 +1404,16 @@ impl PushSrcImpl for WaylandDisplaySrc {
                     gst::warning!(CAT, "Failed to post wolf-hdr-state message: {}", err);
                 }
 
-                // Drive the live HDR-colorimetry state. On an actual change, mark the src pad
-                // for reconfiguration: BaseSrc's streaming loop calls
-                // `gst_pad_check_reconfigure()` before the next buffer, which re-runs
-                // negotiate -> `caps()`/`fixate()`/`set_caps`, producing the new colorimetry
-                // (BT.2100 PQ <-> BT.709) and pushing a fresh CAPS event downstream. The
-                // downstream encoder re-emits its VUI + HDR SEI at the next IDR.
+                // Keep the negotiated P010/PQ transport stable. Reconfiguring caps for every
+                // SDR<->HDR surface transition makes the encoder renegotiate, which produces
+                // flicker and can fail because the downstream Wolf pipeline is already fixed to
+                // P010 HDR. The Vulkan converter uses the compositor's per-frame PQ flag instead.
                 if self.hdr_active.swap(hdr, Ordering::Relaxed) != hdr {
                     gst::info!(
                         CAT,
-                        "WOLF_HDR_CM: HDR colorimetry state changed to {}; forcing src-pad renegotiation",
+                        "WOLF_HDR_CM: compositor HDR state changed to {}; keeping stable HDR10/PQ transport",
                         hdr
                     );
-                    self.obj()
-                        .upcast_ref::<gst_base::BaseSrc>()
-                        .src_pad()
-                        .mark_reconfigure();
                 }
             }
         }

@@ -8,6 +8,33 @@
 
 namespace wolf::core::sessions {
 
+// The initial Moonlight session rounds Vulkan producer dimensions to 64-pixel
+// coding-tree-block boundaries before it creates its compositor.  Lobby
+// creation receives the client's unrounded viewport, so a 1920x1080 Steam
+// lobby could otherwise replace a 1920x1088 Wolf UI producer in the same live
+// interpipesrc.  That geometry change forces caps renegotiation in the already
+// running encoder and is the source of the recurring flash/no-video gap.
+events::VideoSettings normalize_video_settings(events::VideoSettings settings) {
+  if (settings.video_producer_buffer_caps.find("VulkanImage") == std::string::npos) {
+    return settings;
+  }
+
+  auto round_up_64 = [](int value) { return (value + 63) & ~63; };
+  const auto width = round_up_64(settings.width);
+  const auto height = round_up_64(settings.height);
+  if (width != settings.width || height != settings.height) {
+    logs::log(logs::info,
+              "[LOBBY] Vulkan producer: normalizing {}x{} to {}x{} to keep the live video caps stable",
+              settings.width,
+              settings.height,
+              width,
+              height);
+    settings.width = width;
+    settings.height = height;
+  }
+  return settings;
+}
+
 /**
  * @brief Removes the StreamSession from the input Lobby and switches everything to the original session
  *
@@ -75,6 +102,7 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
       [=](const immer::box<events::CreateLobbyEvent> &lobby_settings) {
         logs::log(logs::info, "[LOBBY] Creating new lobby");
         auto ev_bus = app_state->event_bus;
+        const auto video_settings = normalize_video_settings(lobby_settings->video_settings);
 
         auto lobby = std::make_shared<events::Lobby>(
             events::Lobby{.id = lobby_settings->id,
@@ -94,21 +122,21 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
           std::shared_ptr<boost::promise<streaming::WaylandDisplayReady>> on_ready =
               std::make_shared<boost::promise<streaming::WaylandDisplayReady>>();
 
-          std::thread([lobby, lobby_settings, ev_bus, on_ready, gst_context = app_state->gst_context]() {
+          std::thread([lobby, video_settings, ev_bus, on_ready, gst_context = app_state->gst_context]() {
             streaming::start_video_producer(lobby->id,
-                                            lobby_settings->video_settings.video_producer_buffer_caps,
-                                            lobby_settings->video_settings.wayland_render_node,
-                                            {.width = lobby_settings->video_settings.width,
-                                             .height = lobby_settings->video_settings.height,
-                                             .refreshRate = lobby_settings->video_settings.refresh_rate},
-                                            lobby_settings->video_settings.hdr_output,
+                                            video_settings.video_producer_buffer_caps,
+                                            video_settings.wayland_render_node,
+                                            {.width = video_settings.width,
+                                             .height = video_settings.height,
+                                             .refreshRate = video_settings.refresh_rate},
+                                            video_settings.hdr_output,
                                             gst_context,
                                             on_ready,
                                             ev_bus);
           }).detach();
 
           auto w_display_ready = on_ready->get_future().then(
-              [lobby, runtime_dir, ev_bus, audio_server, lobby_settings, host = app_state->host](auto fut) {
+              [lobby, runtime_dir, ev_bus, audio_server, lobby_settings, video_settings, host = app_state->host](auto fut) {
                 streaming::WaylandDisplayReady ready = fut.get();
 
                 auto wl_state =
@@ -144,7 +172,7 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
                                  lobby->plugged_devices_queue,
                                  immer::box<RunnerArgs>{RunnerArgs{
                                      .session_id = lobby->id,
-                                     .video_settings = lobby_settings->video_settings,
+                                     .video_settings = video_settings,
                                      .wayland_display = lobby->wayland_display->load(),
                                      .audio_server = audio_server,
                                      .audio_sink = lobby->audio_sink->load(),

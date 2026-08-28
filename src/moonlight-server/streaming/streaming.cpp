@@ -128,7 +128,9 @@ void start_video_producer(const std::string &session_id,
   std::string hdr_prop = hdr_capable ? " hdr=true" : "";
   auto pipeline = fmt::format(
       "waylanddisplaysrc name=wolf_wayland_source render_node={render_node}{vulkan_prop}{hdr_prop} ! "
-      "{buffer_format}, width={width}, height={height}, framerate={fps}/1 ! \n"    //
+      "queue max-size-buffers=2 leaky=downstream ! "
+      "{buffer_format}, width={width}, height={height}, framerate={fps}/1 ! "
+      "queue max-size-buffers=2 leaky=downstream ! \n"    //
       "interpipesink sync=true async=false name={session_id}_video max-buffers=1", //
       fmt::arg("vulkan_prop", vulkan_prop),
       fmt::arg("hdr_prop", hdr_prop),

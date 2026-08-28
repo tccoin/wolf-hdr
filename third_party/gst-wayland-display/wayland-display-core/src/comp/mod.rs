@@ -45,6 +45,7 @@ use smithay::{
         wayland_server::{
             Display, DisplayHandle,
             backend::{ClientData, ClientId, DisconnectReason, GlobalId},
+            protocol::wl_surface::WlSurface,
         },
     },
     utils::{Clock, DeviceFd, Logical, Monotonic, Physical, Point, Rectangle, Size, Transform},
@@ -125,6 +126,10 @@ pub struct State {
     /// 10-bit frame uses the matrix-only passthrough shader instead of re-applying PQ. Always
     /// false unless WOLF_HDR_CM is set (set only in the compositor commit handler).
     pub(crate) current_input_is_pq: bool,
+    /// Surface that last established `current_input_is_pq`. Do not clear the flag when an
+    /// unrelated popup/cursor surface commits an SDR buffer; the nested Steam compositor can
+    /// submit those after the HDR game surface and would otherwise disable PQ passthrough.
+    pub(crate) current_input_surface: Option<WlSurface>,
 
     // management
     pub output: Option<Output>,
@@ -418,6 +423,7 @@ impl State {
             video_info: None,
             last_render: None,
             current_input_is_pq: false,
+            current_input_surface: None,
 
             space,
             popups: PopupManager::default(),
