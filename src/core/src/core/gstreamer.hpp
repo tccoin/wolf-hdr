@@ -2,6 +2,8 @@
 
 #include <gst/gst.h>
 #include <helpers/logger.hpp>
+#include <functional>
+#include <string>
 
 namespace wolf::core::gstreamer {
 
@@ -9,23 +11,31 @@ using gst_element_ptr = std::shared_ptr<GstElement>;
 using gst_main_loop_ptr = std::shared_ptr<GMainLoop>;
 using gst_main_context_ptr = std::shared_ptr<GMainContext>;
 
+struct PipelineBusData {
+  GMainLoop *loop;
+  std::function<void(const std::string &)> on_error;
+};
+
 static void pipeline_error_handler(GstBus *bus, GstMessage *message, gpointer data) {
-  auto loop = (GMainLoop *)data;
+  auto bus_data = static_cast<PipelineBusData *>(data);
   GError *err;
   gchar *debug;
   gst_message_parse_error(message, &err, &debug);
   logs::log(logs::error, "[GSTREAMER] Pipeline error: {}", err->message);
+  if (bus_data->on_error) {
+    bus_data->on_error(err->message ? err->message : "unknown GStreamer error");
+  }
   g_error_free(err);
   g_free(debug);
 
   /* Terminate pipeline on error */
-  g_main_loop_quit(loop);
+  g_main_loop_quit(bus_data->loop);
 }
 
 static void pipeline_eos_handler(GstBus *bus, GstMessage *message, gpointer data) {
-  auto loop = (GMainLoop *)data;
+  auto bus_data = static_cast<PipelineBusData *>(data);
   logs::log(logs::info, "[GSTREAMER] Pipeline reached End Of Stream");
-  g_main_loop_quit(loop);
+  g_main_loop_quit(bus_data->loop);
 }
 
 /**

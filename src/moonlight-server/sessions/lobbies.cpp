@@ -281,6 +281,44 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
         join_lobby_event->error_message.get()->set_value("");
       }));
 
+  // A GStreamer error must not leave a live runner/audio path attached to a
+  // dead video interpipe.  Tear down the owning lobby or stream so the next
+  // launch gets a fresh compositor and encoder instead of the last frame.
+  handlers.push_back(app_state->event_bus->register_handler<immer::box<events::PipelineFailedEvent>>(
+      [=](const immer::box<events::PipelineFailedEvent> &failure) {
+        logs::log(logs::error,
+                  "[RECOVERY] {} pipeline for {} failed: {}",
+                  failure->pipeline,
+                  failure->source_id,
+                  failure->error);
+
+        const bool producer_failure = failure->pipeline.find("-producer") != std::string::npos;
+        if (producer_failure) {
+          auto lobbies = app_state->lobbies->load();
+          if (state::get_lobby_by_id(lobbies.get(), failure->source_id)) {
+            logs::log(logs::warning,
+                      "[RECOVERY] Stopping failed lobby {} so its runner cannot keep an audio-only session alive",
+                      failure->source_id);
+            app_state->event_bus->fire_event(immer::box<events::StopLobbyEvent>{
+                events::StopLobbyEvent{.lobby_id = failure->source_id}});
+            return;
+          }
+        }
+
+        // Stream pipeline failures use the numeric Moonlight session id.
+        // StopStreamEvent performs the normal input, runner, and client
+        // cleanup path; it is preferable to a silent frozen stream.
+        try {
+          const auto session_id = std::stoull(failure->source_id);
+          app_state->event_bus->fire_event(immer::box<events::StopStreamEvent>{
+              events::StopStreamEvent{.session_id = static_cast<std::size_t>(session_id)}});
+        } catch (const std::exception &) {
+          logs::log(logs::error,
+                    "[RECOVERY] Cannot map failed pipeline source {} to a lobby or Moonlight session",
+                    failure->source_id);
+        }
+      }));
+
   // When a Moonlight session leaves the lobby
   handlers.push_back(app_state->event_bus->register_handler<immer::box<events::LeaveLobbyEvent>>(
       [=](const immer::box<events::LeaveLobbyEvent> &leave_lobby_event) {

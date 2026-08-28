@@ -302,6 +302,17 @@ struct StopStreamEvent {
   std::size_t session_id;
 };
 
+/**
+ * A producer or encoder pipeline failed.  This must be propagated to the
+ * session/lobby owner; otherwise the runner and audio pipeline can survive
+ * while the client keeps receiving the last video frame forever.
+ */
+struct PipelineFailedEvent {
+  std::string source_id;
+  std::string pipeline;
+  std::string error;
+};
+
 struct ClientWolfUIComboEvent {
   std::size_t session_id;
 };
@@ -346,6 +357,7 @@ using EventBusHandlers = dp::handler_registration<immer::box<PlugDeviceEvent>,
                                                   immer::box<PauseStreamEvent>,
                                                   immer::box<ResumeStreamEvent>,
                                                   immer::box<StopStreamEvent>,
+                                                  immer::box<PipelineFailedEvent>,
                                                   immer::box<ClientWolfUIComboEvent>,
                                                   immer::box<RTPVideoPingEvent>,
                                                   immer::box<RTPAudioPingEvent>,
@@ -367,6 +379,7 @@ using EventBusType = dp::event_bus<immer::box<PlugDeviceEvent>,
                                    immer::box<PauseStreamEvent>,
                                    immer::box<ResumeStreamEvent>,
                                    immer::box<StopStreamEvent>,
+                                   immer::box<PipelineFailedEvent>,
                                    immer::box<ClientWolfUIComboEvent>,
                                    immer::box<RTPVideoPingEvent>,
                                    immer::box<RTPAudioPingEvent>,
@@ -388,6 +401,7 @@ using EventsVariant = std::variant<immer::box<PlugDeviceEvent>,
                                    immer::box<PauseStreamEvent>,
                                    immer::box<ResumeStreamEvent>,
                                    immer::box<StopStreamEvent>,
+                                   immer::box<PipelineFailedEvent>,
                                    immer::box<ClientWolfUIComboEvent>,
                                    immer::box<RTPVideoPingEvent>,
                                    immer::box<RTPAudioPingEvent>,

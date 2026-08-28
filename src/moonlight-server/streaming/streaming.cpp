@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <control/control.hpp>
+#include <atomic>
 #include <core/batched_send.hpp>
 #include <gst-video-context.hpp>
 #include <gst/app/gstappsink.h>
@@ -145,6 +146,7 @@ void start_video_producer(const std::string &session_id,
       std::make_shared<GstBusData>(GstBusData{.on_ready = std::move(on_ready), .wayland_plugin = nullptr});
   std::shared_ptr<NeedContextData> ctx_data_ptr =
       std::make_shared<NeedContextData>(NeedContextData{.device_path = render_node, .gst_context = video_context});
+  auto failure_reported = std::make_shared<std::atomic_bool>(false);
   run_pipeline(pipeline, [=](auto pipeline) {
     logs::log(logs::debug, "Setting up waylanddisplaysrc");
 
@@ -174,6 +176,12 @@ void start_video_producer(const std::string &session_id,
         });
 
     return immer::array<immer::box<events::EventBusHandlers>>{std::move(stop_handler), std::move(stop_lobby_handler)};
+  }, [session_id, event_bus, failure_reported](const std::string &error) {
+    if (!failure_reported->exchange(true)) {
+      logs::log(logs::error, "[GSTREAMER] Video producer {} failed: {}", session_id, error);
+      event_bus->fire_event(immer::box<events::PipelineFailedEvent>{events::PipelineFailedEvent{
+          .source_id = session_id, .pipeline = "video-producer", .error = error}});
+    }
   });
 }
 
@@ -208,6 +216,7 @@ void start_audio_producer(const std::string &session_id,
                               fmt::arg("server_name", server_name));
   logs::log(logs::debug, "[GSTREAMER] Starting audio producer: {}", pipeline);
 
+  auto failure_reported = std::make_shared<std::atomic_bool>(false);
   run_pipeline(pipeline, [=](auto pipeline) {
     auto stop_handler = event_bus->register_handler<immer::box<events::StopStreamEvent>>(
         [session_id, pipeline](const immer::box<events::StopStreamEvent> &ev) {
@@ -226,6 +235,12 @@ void start_audio_producer(const std::string &session_id,
         });
 
     return immer::array<immer::box<events::EventBusHandlers>>{std::move(stop_handler), std::move(stop_lobby_handler)};
+  }, [session_id, event_bus, failure_reported](const std::string &error) {
+    if (!failure_reported->exchange(true)) {
+      logs::log(logs::error, "[GSTREAMER] Audio producer {} failed: {}", session_id, error);
+      event_bus->fire_event(immer::box<events::PipelineFailedEvent>{events::PipelineFailedEvent{
+          .source_id = session_id, .pipeline = "audio-producer", .error = error}});
+    }
   });
 }
 
@@ -451,6 +466,7 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
       }});
   std::shared_ptr<NeedContextData> ctx_data_ptr = std::make_shared<NeedContextData>(
       NeedContextData{.device_path = video_session->render_node, .gst_context = video_context});
+  auto failure_reported = std::make_shared<std::atomic_bool>(false);
   run_pipeline(pipeline, [video_session, event_bus, udp_sink, ctx_data_ptr](auto pipeline) {
     if (auto app_sink_el = gst_bin_get_by_name(GST_BIN(pipeline.get()), "wolf_udp_sink")) {
       logs::log(logs::debug, "Setting up wolf_udp_sink");
@@ -534,6 +550,12 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
                                                               std::move(pause_handler),
                                                               std::move(switch_producer_handler),
                                                               std::move(stop_handler)};
+  }, [session_id = video_session->session_id, event_bus, failure_reported](const std::string &error) {
+    if (!failure_reported->exchange(true)) {
+      logs::log(logs::error, "[GSTREAMER] Video stream {} failed: {}", session_id, error);
+      event_bus->fire_event(immer::box<events::PipelineFailedEvent>{events::PipelineFailedEvent{
+          .source_id = std::to_string(session_id), .pipeline = "video-stream", .error = error}});
+    }
   });
 }
 
@@ -571,6 +593,7 @@ void start_streaming_audio(immer::box<events::AudioSession> audio_session,
       .socket = audio_socket,
       .client_endpoint = std::make_shared<udp::endpoint>(boost::asio::ip::make_address(client_ip), client_port)});
 
+  auto failure_reported = std::make_shared<std::atomic_bool>(false);
   run_pipeline(pipeline, [session_id = audio_session->session_id, udp_sink, event_bus](auto pipeline) {
     if (auto app_sink_el = gst_bin_get_by_name(GST_BIN(pipeline.get()), "wolf_udp_sink")) {
       logs::log(logs::debug, "Setting up wolf_udp_sink");
@@ -631,6 +654,12 @@ void start_streaming_audio(immer::box<events::AudioSession> audio_session,
     return immer::array<immer::box<events::EventBusHandlers>>{std::move(pause_handler),
                                                               std::move(switch_producer_handler),
                                                               std::move(stop_handler)};
+  }, [session_id = audio_session->session_id, event_bus, failure_reported](const std::string &error) {
+    if (!failure_reported->exchange(true)) {
+      logs::log(logs::error, "[GSTREAMER] Audio stream {} failed: {}", session_id, error);
+      event_bus->fire_event(immer::box<events::PipelineFailedEvent>{events::PipelineFailedEvent{
+          .source_id = std::to_string(session_id), .pipeline = "audio-stream", .error = error}});
+    }
   });
 }
 

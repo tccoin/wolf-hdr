@@ -66,7 +66,8 @@ void start_streaming_audio(immer::box<events::AudioSession> audio_session,
 static bool run_pipeline(
     const std::string &pipeline_desc,
     const std::function<immer::array<immer::box<events::EventBusHandlers>>(gstreamer::gst_element_ptr /* pipeline */)>
-        &on_pipeline_ready) {
+        &on_pipeline_ready,
+    const std::function<void(const std::string &)> &on_error = {}) {
   GError *error = nullptr;
   gstreamer::gst_element_ptr pipeline(gst_parse_launch(pipeline_desc.c_str(), &error), [](const auto &pipeline) {
     logs::log(logs::trace, "~pipeline");
@@ -75,6 +76,9 @@ static bool run_pipeline(
 
   if (!pipeline) {
     logs::log(logs::error, "[GSTREAMER] Pipeline parse error: {}", error->message);
+    if (on_error) {
+      on_error(error && error->message ? error->message : "pipeline parse error");
+    }
     g_error_free(error);
     return false;
   } else if (error) { // Please note that you might get a return value that is not NULL even though the error is set. In
@@ -96,9 +100,10 @@ static bool run_pipeline(
    * GLib main loop is attached to below
    */
   auto bus = gst_pipeline_get_bus(GST_PIPELINE(pipeline.get()));
+  gstreamer::PipelineBusData bus_data{.loop = loop.get(), .on_error = on_error};
   gst_bus_add_signal_watch(bus);
-  g_signal_connect(bus, "message::error", G_CALLBACK(gstreamer::pipeline_error_handler), loop.get());
-  g_signal_connect(bus, "message::eos", G_CALLBACK(gstreamer::pipeline_eos_handler), loop.get());
+  g_signal_connect(bus, "message::error", G_CALLBACK(gstreamer::pipeline_error_handler), &bus_data);
+  g_signal_connect(bus, "message::eos", G_CALLBACK(gstreamer::pipeline_eos_handler), &bus_data);
   gst_object_unref(bus);
 
   /* Set the pipeline to "playing" state*/
