@@ -93,6 +93,11 @@ struct GstreamerSettings {
   GstAudioCfg audio;
 };
 
+/** Settings that are safe to change while Wolf is running. */
+struct RuntimeSettings {
+  int single_player_disconnect_grace_seconds = 10 * 60;
+};
+
 struct AppCMD {
   using Tag = rfl::Literal<"process", "Process">;
   std::string run_cmd;
@@ -156,6 +161,7 @@ struct WolfConfig {
   std::vector<PairedClient> paired_clients;
   std::vector<Profile> profiles;
   GstreamerSettings gstreamer;
+  RuntimeSettings runtime;
 };
 
 struct BaseConfig {

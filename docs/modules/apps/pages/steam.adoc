@@ -4,6 +4,45 @@ One of the pre-installed applications in the default Wolf configuration is Steam
 Getting Steam to work in a headless container took some work, so this page lists some limitations
 and tips to get the most out of Steam.
 
+== HDR Steam sessions
+
+Steam's own library, Store and Big Picture UI are SDR surfaces.  For an HDR client, the correct
+arrangement is to run Steam inside a Gamescope Steam session (`gamescope -e --hdr-enabled`):
+Gamescope exposes its HDR capability to Steam and maps those SDR UI surfaces to the configured
+SDR reference white, while HDR-capable Proton games submit their own PQ surface.  Do not enable
+Gamescope HDR inverse tone mapping for this path: inverse tone mapping is only for SDR input and
+changes the appearance of native HDR games.
+
+The Wolf `Steam HDR` launcher is transport-aware.  It starts Gamescope HDR only when the
+connected Moonlight client negotiated HDR; otherwise it uses Wolf's native SDR output path.
+It intentionally does not set `PROTON_ENABLE_WAYLAND` globally because that experimental Wine
+driver can break Steam Input.  The normal Gamescope/XWayland route remains the default.
+It also uses the same `STEAM_GAMESCOPE_COLOR_MANAGED` and
+`STEAM_GAMESCOPE_VIRTUAL_WHITE` declarations as a SteamOS Gamescope session, with SDR gamut
+widening disabled.  This keeps Steam UI and SDR-only games in sRGB instead of treating them as
+wide-gamut HDR content.
+
+=== Games that do not expose an HDR option
+
+First use a current Proton version and launch the game from the HDR Steam session.  For a title
+that still does not expose HDR, add this to *that game's* Steam launch options:
+
+[source]
+....
+/opt/gow/steam-hdr-game-env.sh %command%
+....
+
+The wrapper enables `DXVK_HDR`, `ENABLE_GAMESCOPE_WSI`, `ENABLE_HDR_WSI` and
+`PROTON_ENABLE_HDR` only for an HDR Moonlight connection.  It is a no-op HDR-wise for SDR
+connections, so a per-game setting cannot accidentally send PQ into Wolf's SDR encoder.
+
+[NOTE]
+====
+Only add `PROTON_ENABLE_WAYLAND=1` to a single game's launch options if that title needs the
+experimental Wine Wayland driver and controller input has been tested.  It is not a general HDR
+switch.
+====
+
 == Directly launch a Steam game ==
 
 In order to directly launch a Steam game from Moonlight you can just copy the existing `[[apps]]` entry for Steam, change the name and just add the Steam app ID as env variable; example:

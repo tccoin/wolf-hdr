@@ -250,7 +250,18 @@ TEST_CASE("HDR video pipeline selects a 10-bit encoder path", "[Streaming][HDR]"
   auto hdr = streaming::prepare_video_pipeline(pipeline, true);
   REQUIRE_THAT(hdr, Catch::Matchers::ContainsSubstring("format=P010_10LE"));
   REQUIRE_THAT(hdr, Catch::Matchers::ContainsSubstring("profile=main-10"));
+  REQUIRE_THAT(hdr, Catch::Matchers::ContainsSubstring("mastering-display-info="));
+  REQUIRE_THAT(hdr, Catch::Matchers::ContainsSubstring("content-light-level="));
   REQUIRE(streaming::prepare_video_pipeline(pipeline, false) == pipeline);
+}
+
+TEST_CASE("SDR uses Wolf's native CUDA conversion path", "[Streaming][SDR]") {
+  const auto hdr_pipeline = std::string{
+      "interpipesrc ! queue ! cudaupload ! video/x-raw(memory:CUDAMemory), format=NV12 ! nvh265enc"};
+
+  const auto sdr = streaming::prepare_video_pipeline(hdr_pipeline, false);
+  REQUIRE_THAT(sdr, Catch::Matchers::ContainsSubstring("cudaupload ! cudaconvertscale add-borders=true !"));
+  REQUIRE_THAT(sdr, Catch::Matchers::ContainsSubstring("format=NV12"));
 }
 
 TEST_CASE("HDR transport remains PQ while SDR producer frames are converted", "[Streaming][HDR]") {
@@ -259,6 +270,61 @@ TEST_CASE("HDR transport remains PQ while SDR producer frames are converted", "[
   REQUIRE(streaming::initial_video_colorimetry(false, events::ColorSpace::BT601) == "bt601");
   REQUIRE(streaming::initial_video_colorimetry(false, events::ColorSpace::BT709) == "bt709");
   REQUIRE(streaming::initial_video_colorimetry(false, events::ColorSpace::BT2020) == "bt2020");
+}
+
+TEST_CASE("HDR-capable producer preserves its P010 Vulkan PQ path", "[Streaming][HDR]") {
+  const auto vulkan = std::string{"video/x-raw(memory:VulkanImage), format=P010_10LE, colorimetry=bt2100-pq"};
+  REQUIRE(streaming::producer_caps_for_output(vulkan, true) == vulkan);
+  REQUIRE(streaming::producer_caps_for_output(vulkan, false) ==
+          "video/x-raw(memory:VulkanImage), format=NV12, colorimetry=bt709");
+
+  const auto dmabuf = std::string{"video/x-raw(memory:DMABuf), format=DMA_DRM, drm-format=P010"};
+  REQUIRE(streaming::producer_caps_for_output(dmabuf, true) == dmabuf);
+  REQUIRE(streaming::producer_caps_for_output(dmabuf, false) ==
+          "video/x-raw(memory:DMABuf), format=DMA_DRM, drm-format=NV12");
+
+  const auto vulkan_to_cuda = std::string{
+      "video/x-raw(memory:VulkanImage), format=P010_10LE, colorimetry=bt2100-pq ! "
+      "vulkandownload ! video/x-raw, format=P010_10LE, colorimetry=bt2100-pq"};
+  REQUIRE(streaming::producer_caps_for_output(vulkan_to_cuda, true) == vulkan_to_cuda);
+  REQUIRE(streaming::producer_caps_for_output(vulkan_to_cuda, false) == "video/x-raw");
+
+  const auto gl_rgb10 = std::string{"video/x-raw(memory:GLMemory), format=RGB10A2_LE"};
+  const auto gl_hdr = streaming::producer_caps_for_output(gl_rgb10, true);
+  // The GL producer itself advertises the PQ transfer. Requiring bt2100-pq
+  // here would make a legacy producer caps filter reject RGB10A2 before the
+  // source can expose its own HDR caps.
+  REQUIRE(gl_hdr.find("colorimetry=bt2100-pq") == std::string::npos);
+  // Static HDR10 metadata is emitted by the NVENC P010 encoder stage. The
+  // GL producer must not require it in its own caps, because the source only
+  // advertises RGB10A2 PQ and GStreamer otherwise cannot negotiate the first
+  // frame during a Wolf UI -> Steam switch.
+  REQUIRE(gl_hdr.find("mastering-display-info=") == std::string::npos);
+  REQUIRE(gl_hdr.find("content-light-level=") == std::string::npos);
+  REQUIRE(streaming::producer_caps_for_output(gl_rgb10, false) ==
+          "video/x-raw(memory:CUDAMemory), format=BGRA");
+}
+
+TEST_CASE("A compositor is reused only for an identical video output contract", "[Streaming][HDR][Resume]") {
+  events::StreamSession current{
+      .display_mode = moonlight::DisplayMode{3440, 1440, 165},
+      .hdr_output_requested = true,
+  };
+  auto requested = current;
+
+  REQUIRE(state::has_same_video_output_contract(current, requested));
+
+  requested.display_mode.refreshRate = 60;
+  REQUIRE_FALSE(state::has_same_video_output_contract(current, requested));
+  requested.display_mode.refreshRate = 165;
+
+  requested.display_mode.width = 1920;
+  requested.display_mode.height = 1080;
+  REQUIRE_FALSE(state::has_same_video_output_contract(current, requested));
+  requested.display_mode = current.display_mode;
+
+  requested.hdr_output_requested = false;
+  REQUIRE_FALSE(state::has_same_video_output_contract(current, requested));
 }
 
 TEST_CASE("HDR host capability requires an encoder and a live HDR application", "[LocalState][HDR]") {

@@ -1,0 +1,64 @@
+diff --git a/subprojects/gst-plugins-bad/sys/nvcodec/gstnvh265encoder.cpp b/subprojects/gst-plugins-bad/sys/nvcodec/gstnvh265encoder.cpp
+index 1fc20470c..dc7d00f91 100644
+--- a/subprojects/gst-plugins-bad/sys/nvcodec/gstnvh265encoder.cpp
++++ b/subprojects/gst-plugins-bad/sys/nvcodec/gstnvh265encoder.cpp
+@@ -1629,6 +1629,18 @@ gst_nv_h265_encoder_set_format (GstNvEncoder * encoder,
+   }
+ 
+   GstVideoColorimetry cinfo;
++  gboolean wolf_hdr_pq = FALSE;
++  if (GST_VIDEO_INFO_FORMAT (info) == GST_VIDEO_FORMAT_RGB10A2_LE &&
++      state->caps) {
++    const GstStructure *s = gst_caps_get_structure (state->caps, 0);
++    gst_structure_get_boolean (s, "wolf-hdr-pq", &wolf_hdr_pq);
++  }
++
++  if (wolf_hdr_pq) {
++    /* RGB10A2 is converted to 4:2:0 by NVENC.  Its generic RGB path
++     * otherwise stamps the resulting HEVC stream as BT.709. */
++    gst_video_colorimetry_from_string (&cinfo, GST_VIDEO_COLORIMETRY_BT2100_PQ);
++  } else {
+   switch (GST_VIDEO_INFO_FORMAT (info)) {
+     case GST_VIDEO_FORMAT_NV12:
+     case GST_VIDEO_FORMAT_P010_10LE:
+@@ -1643,5 +1655,6 @@ gst_nv_h265_encoder_set_format (GstNvEncoder * encoder,
+       gst_video_colorimetry_from_string (&cinfo, GST_VIDEO_COLORIMETRY_BT709);
+       break;
+   }
++  }
+ 
+   vui->videoSignalTypePresentFlag = 1;
+@@ -1692,4 +1704,33 @@ gst_nv_h265_encoder_set_format (GstNvEncoder * encoder,
+ 
+   g_array_set_size (self->sei_array, 0);
++
++  if (wolf_hdr_pq) {
++    /* RGB caps have no YUV colorimetry field and interpipe can omit HDR
++     * metadata. Emit the stable HDR10 mastering/CLL pair directly. */
++    GstH265SEIMessage sei;
++    GstH265MasteringDisplayColourVolume *mdcv;
++
++    memset (&sei, 0, sizeof (GstH265SEIMessage));
++    sei.payloadType = GST_H265_SEI_MASTERING_DISPLAY_COLOUR_VOLUME;
++    mdcv = &sei.payload.mastering_display_colour_volume;
++    /* HEVC stores display primaries in GBR order. */
++    mdcv->display_primaries_x[0] = 8500;
++    mdcv->display_primaries_y[0] = 39850;
++    mdcv->display_primaries_x[1] = 6550;
++    mdcv->display_primaries_y[1] = 2300;
++    mdcv->display_primaries_x[2] = 35400;
++    mdcv->display_primaries_y[2] = 14600;
++    mdcv->white_point_x = 15635;
++    mdcv->white_point_y = 16450;
++    mdcv->max_display_mastering_luminance = 10000000;
++    mdcv->min_display_mastering_luminance = 1;
++    g_array_append_val (self->sei_array, sei);
++
++    memset (&sei, 0, sizeof (GstH265SEIMessage));
++    sei.payloadType = GST_H265_SEI_CONTENT_LIGHT_LEVEL;
++    sei.payload.content_light_level.max_content_light_level = 1000;
++    sei.payload.content_light_level.max_pic_average_light_level = 400;
++    g_array_append_val (self->sei_array, sei);
++  }
+ 
+   if (state->mastering_display_info) {

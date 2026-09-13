@@ -107,10 +107,102 @@ static void replace_all(std::string &value, std::string_view from, std::string_v
 
 std::string prepare_video_pipeline(std::string pipeline, bool hdr_requested) {
   if (hdr_requested) {
+    // The native HDR producer exports a PQ RGB10A2 GL texture.  Feed that
+    // texture through CUDA's explicit 10-bit RGB-to-P010 conversion before
+    // NVENC.  Direct RGB10A2 input leaves the YUV conversion to NVENC, whose
+    // RGB path has no reliable BT.2020/PQ contract on this driver.
+    const bool native_gl_hdr = std::string(utils::get_env("WOLF_NATIVE_GL_HDR", "0")) == "1" &&
+                               pipeline.find("nvh265enc") != std::string::npos;
+    if (native_gl_hdr) {
+      replace_all(pipeline, "cudaupload !", "cudaupload ! cudaconvertscale add-borders=true !");
+      replace_all(pipeline, "format=NV12", "format=P010_10LE");
+      replace_all(pipeline, "colorimetry={color_space}", "colorimetry=bt2100-pq");
+      replace_all(pipeline,
+                  "format=P010_10LE",
+                  "format=P010_10LE, "
+                  "mastering-display-info=(string)35400:14600:8500:39850:6550:2300:15635:16450:10000000:1, "
+                  "content-light-level=(string)1000:400");
+      replace_all(pipeline, "profile=main,", "profile=main-10,");
+      return pipeline;
+    }
+
     replace_all(pipeline, "format=NV12", "format=P010_10LE");
     replace_all(pipeline, "profile=main,", "profile=main-10,");
+    // Feed a complete HDR10 contract into NVENC. nvh265enc copies these raw
+    // caps into the HEVC VUI and static HDR SEI; relying on metadata inherited
+    // from the producer is fragile across the interpipe boundary.
+    replace_all(pipeline,
+                "format=P010_10LE",
+                "format=P010_10LE, "
+                "mastering-display-info=(string)35400:14600:8500:39850:6550:2300:15635:16450:10000000:1, "
+                "content-light-level=(string)1000:400");
+  } else {
+    // Keep the SDR path exactly on Wolf's established interpipe contract.
+    // These restrictions were introduced to freeze the HDR UI-to-app handoff,
+    // but retaining them on an SDR encoder leaves a listener registered after
+    // the producer ends.  A following Steam connection then receives stale
+    // buffers (and gst-interpipe reports an invalid listener).  SDR has no
+    // HDR-capability handoff to preserve, so it must accept the ordinary
+    // event/caps lifecycle.
+    replace_all(pipeline, " format=time", "");
+    replace_all(pipeline, " allow-renegotiation=false", "");
+    replace_all(pipeline, " accept-events=false", "");
+    replace_all(pipeline, " accept-eos-event=false", "");
+
+    // The producer converts its CUDA buffer into ordinary BGRA before the
+    // interpipe boundary.  Re-upload it into this encoder pipeline's own CUDA
+    // context, then convert to NV12 for NVENC.  Two Wayland producers (Wolf UI
+    // and a Steam lobby) own different CUDA buffer pools; passing either pool
+    // directly through interpipesrc makes a live listener switch fail caps
+    // negotiation.  This is deliberately SDR-only; HDR has a separate P010
+    // contract and must remain zero-copy.
+    replace_all(pipeline, "cudaupload !", "cudaupload ! cudaconvertscale add-borders=true !");
   }
   return pipeline;
+}
+
+std::string producer_caps_for_output(std::string caps, bool hdr_output_requested) {
+  if (hdr_output_requested) {
+    // An HDR Moonlight connection uses one stable PQ transport contract for its
+    // whole lifetime. Wolf UI is replaced by the Steam producer after the encoder
+    // pipeline already exists. Starting that producer as BT.709 asks CUDA to
+    // renegotiate a live BGRA-to-P010 pipeline and disconnects the client.
+    replace_all(caps, ", colorimetry=bt709", "");
+    replace_all(caps, ",colorimetry=bt709", "");
+    if (caps.find("memory:CUDAMemory") != std::string::npos && caps.find("colorimetry=") == std::string::npos) {
+      caps += ", colorimetry=bt2100-pq";
+    }
+    // The GL source advertises the RGB HDR transfer via its `wolf-hdr-pq`
+    // marker. Its advertised GLMemory caps contain the PQ colour contract, but
+    // intentionally do not carry HDR10 static metadata. Requiring mastering
+    // display / CLL fields at this producer-side capsfilter asks GStreamer to
+    // transform GLMemory into a variant it does not offer, leaving a black
+    // stream (or failing with NOT_NEGOTIATED) before the first frame. NVENC
+    // receives the same fixed HDR10 metadata after the CUDA RGB-to-P010
+    // conversion, where it belongs in the encoded bitstream.
+    if (caps.find("memory:GLMemory") != std::string::npos) {
+      replace_all(caps, ", mastering-display-info=(string)35400:14600:8500:39850:6550:2300:15635:16450:10000000:1", "");
+      replace_all(caps, ", content-light-level=(string)1000:400", "");
+    }
+    return caps;
+  }
+  if (!hdr_output_requested) {
+    // The native GL bridge is deliberately HDR-only. An SDR Moonlight request
+    // continues through Wolf's established BGRA/CUDA conversion path; H.264
+    // cannot consume RGB10A2 and must not inherit PQ producer caps.
+    if (caps.find("memory:GLMemory") != std::string::npos) {
+      return "video/x-raw(memory:CUDAMemory), format=BGRA";
+    }
+    // This HDR override contains a P010 Vulkan download. Do not run it for SDR: return to the
+    // ordinary Wolf raw producer, matched by the native CUDA conversion branch above.
+    if (caps.find("vulkandownload") != std::string::npos) {
+      return "video/x-raw";
+    }
+    replace_all(caps, "P010_10LE", "NV12");
+    replace_all(caps, "drm-format=P010", "drm-format=NV12");
+    replace_all(caps, "colorimetry=bt2100-pq", "colorimetry=bt709");
+  }
+  return caps;
 }
 
 void start_video_producer(const std::string &session_id,
@@ -124,18 +216,70 @@ void start_video_producer(const std::string &session_id,
   // The native Vulkan zero-copy path needs the source in Vulkan mode so it emits NV12
   // memory:VulkanImage (selected when the negotiated producer caps are VulkanImage).
   std::string vulkan_prop = buffer_format.find("VulkanImage") != std::string::npos ? " vulkan=true" : "";
+  // GLMemory/RGB10A2 is the explicit native-PQ route. Keep it opt-in from the
+  // selected app profile so all ordinary SDR sessions retain Wolf's CUDA path.
+  std::string gl_hdr_prop = buffer_format.find("memory:GLMemory") != std::string::npos ? " gl-hdr=true" : "";
   // HDR is an application/producer capability, not an inference from the
   // selected allocation format.
   std::string hdr_prop = hdr_capable ? " hdr=true" : "";
+  // Keep every HDR producer on one fully specified caps contract from its first
+  // negotiation, including across the Wolf UI -> Steam handoff.
+  std::string producer_caps = producer_caps_for_output(buffer_format, hdr_capable);
+  // Put the display mode on the first (Vulkan) caps structure as well as on the
+  // post-download caps.  If it is only present after vulkandownload, the
+  // interpipe handoff can ask waylanddisplaysrc to renegotiate when Wolf UI is
+  // replaced by Steam, which stops the producer with not-negotiated.
+  const auto first_caps_end = producer_caps.find(" ! ");
+  const auto mode_caps = fmt::format(
+      ", width={}, height={}, framerate={}/1", display_mode.width, display_mode.height, display_mode.refreshRate);
+  if (first_caps_end == std::string::npos) {
+    producer_caps += mode_caps;
+  } else {
+    producer_caps.insert(first_caps_end, mode_caps);
+  }
+  if (hdr_capable && producer_caps.find("P010_10LE") != std::string::npos) {
+    if (producer_caps.find("colorimetry=") == std::string::npos) {
+      producer_caps += ", colorimetry=bt2100-pq";
+    }
+    // Keep static HDR metadata out of the Vulkan-download/interpipe boundary.  The
+    // downstream CUDA upload element rejects those extra caps fields while switching
+    // from Wolf UI to Steam, even though nvh265enc accepts them.  The encoder pipeline
+    // adds the same fixed mastering/CLL metadata after cudaupload, immediately before
+    // NVENC, so the bitstream signalling is unchanged and the live handoff stays
+    // negotiated.
+    replace_all(producer_caps, ", mastering-display-info=(string)35400:14600:8500:39850:6550:2300:15635:16450:10000000:1", "");
+    replace_all(producer_caps, ", content-light-level=(string)1000:400", "");
+  }
+  // An SDR stream may switch from the Wolf UI producer to a lobby producer
+  // without recreating its NVENC pipeline.  Isolate the two producers' CUDA
+  // allocation pools at the interpipe boundary so that switch is a plain
+  // BGRA caps hand-off instead of a cross-pipeline CUDA-context renegotiation.
+  std::string interpipe_bridge;
+  if (!hdr_capable && producer_caps.find("memory:CUDAMemory") != std::string::npos &&
+      producer_caps.find("format=BGRA") != std::string::npos) {
+    // cudadownload can otherwise preserve CUDAMemory when its downstream queue
+    // accepts either feature.  videoconvert only accepts ordinary raw frames, so
+    // it forces the producer-side CUDA download before the interpipe boundary.
+    // This keeps the listener switch independent of the CUDA allocation pool
+    // belonging to the previous producer.
+    interpipe_bridge = fmt::format("cudadownload ! videoconvert ! video/x-raw, format=BGRA, width={}, height={}, framerate={}/1 ! ",
+                                   display_mode.width,
+                                   display_mode.height,
+                                   display_mode.refreshRate);
+  }
   auto pipeline = fmt::format(
-      "waylanddisplaysrc name=wolf_wayland_source render_node={render_node}{vulkan_prop}{hdr_prop} ! "
+      "waylanddisplaysrc name=wolf_wayland_source render_node={render_node}{vulkan_prop}{gl_hdr_prop}{hdr_prop} ! "
       "queue max-size-buffers=2 leaky=downstream ! "
-      "{buffer_format}, width={width}, height={height}, framerate={fps}/1 ! "
+      "{buffer_format} ! {interpipe_bridge}"
       "queue max-size-buffers=2 leaky=downstream ! \n"    //
-      "interpipesink sync=true async=false name={session_id}_video max-buffers=1", //
+      // The producer is a live source and owns frame pacing. Do not wait on an old
+      // producer-clock timestamp when a listener reconnects.
+      "interpipesink sync=false async=false name={session_id}_video max-buffers=1", //
       fmt::arg("vulkan_prop", vulkan_prop),
+      fmt::arg("gl_hdr_prop", gl_hdr_prop),
       fmt::arg("hdr_prop", hdr_prop),
-      fmt::arg("buffer_format", buffer_format),
+      fmt::arg("buffer_format", producer_caps),
+      fmt::arg("interpipe_bridge", interpipe_bridge),
       fmt::arg("render_node", render_node),
       fmt::arg("session_id", session_id),
       fmt::arg("width", display_mode.width),
@@ -416,6 +560,7 @@ static void configure_appsink(GstElement *appsink, UDPSink *udp_sink) {
   callbacks.new_sample = on_new_sample;
   gst_app_sink_set_callbacks(GST_APP_SINK(appsink), &callbacks, udp_sink, nullptr);
 }
+
 } // namespace custom_sink
 
 /**
@@ -451,6 +596,7 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
       fmt::arg("vk_b_frames", utils::get_env("WOLF_VULKAN_B_FRAMES", "0")),
       fmt::arg("color_space", color_space),
       fmt::arg("color_range", color_range),
+      fmt::arg("render_node", video_session->render_node),
       fmt::arg("host_port", video_session->port));
   logs::log(logs::debug, "Starting video pipeline: \n{}", pipeline);
 
@@ -474,7 +620,6 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
       configure_appsink(app_sink_el, udp_sink.get());
       gst_object_unref(app_sink_el);
     }
-
     auto bus = gst_pipeline_get_bus(GST_PIPELINE(pipeline.get()));
     gst_bus_set_sync_handler(bus, bus_sync_handler, ctx_data_ptr.get(), nullptr);
     gst_object_unref(bus);
@@ -528,7 +673,13 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
             /* Grab a reference to the interpipesrc */
             auto pipe_name = fmt::format("interpipesrc_{}_video", sess_id);
             if (auto src = gst_bin_get_by_name(GST_BIN(pipeline.get()), pipe_name.c_str())) {
-              /* Perform the switch */
+              /*
+               * Do not call gst_app_src_set_caps() while the interpipesrc
+               * streaming task is active.  That API takes the AppSrc lock and
+               * can deadlock with the interpipe producer during a lobby switch;
+               * the following producer is allowed to negotiate the fixed
+               * P010/HDR contract instead.
+               */
               auto video_interpipe = fmt::format("{}_video", switch_ev->interpipe_src_id);
               g_object_set(src, "listen-to", video_interpipe.c_str(), nullptr);
               gst_object_unref(src);
@@ -633,7 +784,7 @@ void start_streaming_audio(immer::box<events::AudioSession> audio_session,
 
             auto pipe_name = fmt::format("interpipesrc_{}_audio", session_id);
             if (auto src = gst_bin_get_by_name(GST_BIN(pipeline.get()), pipe_name.c_str())) {
-              /* Perform the switch */
+              /* Switch without resetting AppSrc caps from the streaming thread. */
               auto audio_interpipe = fmt::format("{}_audio", switch_ev->interpipe_src_id);
               g_object_set(src, "listen-to", audio_interpipe.c_str(), nullptr);
               gst_object_unref(src);

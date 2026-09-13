@@ -6,34 +6,49 @@
 #include <state/sessions.hpp>
 #include <streaming/streaming.hpp>
 
+#include <chrono>
+#include <thread>
+
 namespace wolf::core::sessions {
 
-// The initial Moonlight session rounds Vulkan producer dimensions to 64-pixel
-// coding-tree-block boundaries before it creates its compositor.  Lobby
-// creation receives the client's unrounded viewport, so a 1920x1080 Steam
-// lobby could otherwise replace a 1920x1088 Wolf UI producer in the same live
-// interpipesrc.  That geometry change forces caps renegotiation in the already
-// running encoder and is the source of the recurring flash/no-video gap.
-events::VideoSettings normalize_video_settings(events::VideoSettings settings) {
-  if (settings.video_producer_buffer_caps.find("VulkanImage") == std::string::npos) {
-    return settings;
-  }
+namespace {
 
-  auto round_up_64 = [](int value) { return (value + 63) & ~63; };
-  const auto width = round_up_64(settings.width);
-  const auto height = round_up_64(settings.height);
-  if (width != settings.width || height != settings.height) {
-    logs::log(logs::info,
-              "[LOBBY] Vulkan producer: normalizing {}x{} to {}x{} to keep the live video caps stable",
-              settings.width,
-              settings.height,
-              width,
-              height);
-    settings.width = width;
-    settings.height = height;
-  }
-  return settings;
+void schedule_single_player_cleanup(
+    const std::shared_ptr<events::EventBusType> &event_bus,
+    const std::shared_ptr<immer::atom<immer::vector<events::Lobby>>> &lobbies,
+    const std::chrono::seconds grace_period,
+    const events::Lobby &lobby) {
+  const auto generation = lobby.empty_session_generation->fetch_add(1) + 1;
+  const auto lobby_id = lobby.id;
+  const auto empty_session_generation = lobby.empty_session_generation;
+
+  logs::log(logs::info,
+            "[LOBBY] Single-player lobby {} is empty; it will stop after {} minutes unless a client reconnects",
+            lobby_id,
+            std::chrono::duration_cast<std::chrono::minutes>(grace_period).count());
+
+  std::thread([lobby_id, generation, empty_session_generation, event_bus, lobbies, grace_period]() {
+    std::this_thread::sleep_for(grace_period);
+
+    // A reconnect, another disconnect cycle, or an explicit stop supersedes
+    // this timer. Never let an old timer tear down a resumed game.
+    if (empty_session_generation->load() != generation) {
+      return;
+    }
+
+    auto current_lobbies = lobbies->load();
+    auto current_lobby = state::get_lobby_by_id(current_lobbies.get(), lobby_id);
+    if (!current_lobby || current_lobby->multi_user || !current_lobby->connected_sessions->load()->empty() ||
+        current_lobby->empty_session_generation->load() != generation) {
+      return;
+    }
+
+    logs::log(logs::info, "[LOBBY] Disconnect grace period elapsed; stopping single-player lobby {}", lobby_id);
+    event_bus->fire_event(immer::box<events::StopLobbyEvent>{events::StopLobbyEvent{.lobby_id = lobby_id}});
+  }).detach();
 }
+
+} // namespace
 
 /**
  * @brief Removes the StreamSession from the input Lobby and switches everything to the original session
@@ -42,6 +57,8 @@ events::VideoSettings normalize_video_settings(events::VideoSettings settings) {
  * like terminating the lobby if it becomes empty or triggering additional events.
  */
 void leave_lobby(const std::shared_ptr<events::EventBusType> &ev_bus,
+                 const std::shared_ptr<immer::atom<immer::vector<events::Lobby>>> &lobbies,
+                 const std::chrono::seconds single_player_disconnect_grace,
                  const events::Lobby &lobby,
                  const events::StreamSession &session) {
   logs::log(logs::info, "[LOBBY] Session {} leaving lobby {}", session.session_id, lobby.id);
@@ -85,9 +102,13 @@ void leave_lobby(const std::shared_ptr<events::EventBusType> &ev_bus,
       events::SwitchStreamProducerEvents{.session_id = session.session_id,
                                          .interpipe_src_id = std::to_string(session.session_id)}});
 
-  if (lobby.stop_when_everyone_leaves && lobby.connected_sessions->load()->size() == 0) {
-    // Nobody left in the lobby, and it's set to stop when everyone leaves
-    ev_bus->fire_event(immer::box<events::StopLobbyEvent>{events::StopLobbyEvent{.lobby_id = lobby.id}});
+  if (lobby.connected_sessions->load()->size() == 0) {
+    if (!lobby.multi_user) {
+      schedule_single_player_cleanup(ev_bus, lobbies, single_player_disconnect_grace, lobby);
+    } else if (lobby.stop_when_everyone_leaves) {
+      // Multi-user lobbies retain Wolf's existing immediate-stop behaviour.
+      ev_bus->fire_event(immer::box<events::StopLobbyEvent>{events::StopLobbyEvent{.lobby_id = lobby.id}});
+    }
   }
 }
 
@@ -102,7 +123,7 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
       [=](const immer::box<events::CreateLobbyEvent> &lobby_settings) {
         logs::log(logs::info, "[LOBBY] Creating new lobby");
         auto ev_bus = app_state->event_bus;
-        const auto video_settings = normalize_video_settings(lobby_settings->video_settings);
+        const auto video_settings = lobby_settings->video_settings;
 
         auto lobby = std::make_shared<events::Lobby>(
             events::Lobby{.id = lobby_settings->id,
@@ -242,6 +263,10 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
           return;
         }
 
+        // Invalidate any disconnect grace timer before a resumed lobby gains
+        // input or switches its stream producer back to the game.
+        lobby->empty_session_generation->fetch_add(1);
+
         // Update the lobby with the new session
         lobby->connected_sessions->update([session](const immer::vector<immer::box<std::string>> &connected_sessions) {
           return connected_sessions.push_back({std::to_string(session->session_id)});
@@ -333,7 +358,12 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
                     leave_lobby_event->lobby_id,
                     leave_lobby_event->moonlight_session_id);
         } else {
-          leave_lobby(app_state->event_bus, lobby.value(), session.value());
+          const auto runtime_settings = app_state->config->runtime_settings->load();
+          leave_lobby(app_state->event_bus,
+                      app_state->lobbies,
+                      std::chrono::seconds(runtime_settings->single_player_disconnect_grace_seconds),
+                      lobby.value(),
+                      session.value());
         }
       }));
 

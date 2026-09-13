@@ -34,8 +34,20 @@ if [ -z "${PULSE_SERVER:-}" ] && command -v pulseaudio >/dev/null 2>&1; then
     # Wolf reports it verbatim to the app containers and the socket mount matches.
     export PULSE_SERVER="$XDG_RUNTIME_DIR/pulse-socket"
     export WOLF_EMBED_PULSE=true
-    # Remove a stale socket, PulseAudio refuses to start otherwise
-    rm -f "$PULSE_SERVER"
+    # Docker creates a directory when an app container bind-mounts a socket
+    # path before PulseAudio has created it.  That directory is invisible as a
+    # problem to the host process but gets mounted into later app containers,
+    # which then cannot connect to PulseAudio.  Remove only this exact, empty
+    # stale directory; never recurse through the shared sockets directory.
+    if [ -d "$PULSE_SERVER" ] && [ ! -L "$PULSE_SERVER" ]; then
+        rmdir "$PULSE_SERVER" || {
+            echo "Refusing to replace non-empty PulseAudio path: $PULSE_SERVER" >&2
+            exit 1
+        }
+    else
+        # Remove a stale socket or file; PulseAudio refuses to start otherwise.
+        rm -f "$PULSE_SERVER"
+    fi
 else
     # An external PULSE_SERVER was provided, or pulseaudio isn't installed: don't
     # manage PA ourselves. Wolf connects to PULSE_SERVER if set, otherwise it

@@ -17,6 +17,8 @@ use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use tracing_subscriber::Registry;
 use tracing_subscriber::layer::SubscriberExt;
+#[cfg(feature = "gl-hdr")]
+use crate::waylandsrc::hdr_gl::HdrGlBridge;
 #[cfg(feature = "cuda")]
 use waylanddisplaycore::utils::allocator::{
     cuda,
@@ -86,8 +88,25 @@ pub struct Settings {
     /// content-light-level caps fields, so a downstream `vulkanh265enc` emits the matching
     /// VUI + mastering/CLL SEI. Only affects the P010 path; NV12/SDR is unchanged. Default off.
     hdr: bool,
+    /// Opt into the HDR-only desktop-GL bridge. The compositor renders its native AB30
+    /// dma-buf, then the bridge exposes that exact 10-bit texture as GLMemory/RGB10A2 to
+    /// NVENC. Off by default: SDR continues to use the established CUDA path.
+    #[cfg(feature = "gl-hdr")]
+    gl_hdr: bool,
+    #[cfg(feature = "gl-hdr")]
+    gl_hdr_bridge: Option<HdrGlBridge>,
+    /// Modifier of the AB30 render target selected in set_caps(). This is required for the
+    /// explicit EGL dma-buf import performed in create().
+    #[cfg(feature = "gl-hdr")]
+    gl_hdr_modifier: Option<u64>,
     #[cfg(feature = "cuda")]
     cuda_context: Option<Arc<Mutex<cuda::CUDAContext>>>,
+    /// Guards the re-entrant set_context() call made by
+    /// gst_cuda_ensure_element_context(). During that call the in/out raw
+    /// pointer is owned by the outer acquisition and must not be wrapped a
+    /// second time.
+    #[cfg(feature = "cuda")]
+    cuda_context_acquiring: bool,
     #[cfg(feature = "cuda")]
     cuda_raw_ptr: AtomicPtr<cuda::GstCudaContext>,
 }
@@ -338,6 +357,15 @@ impl ObjectImpl for WaylandDisplaySrc {
                     )
                     .default_value(false)
                     .build(),
+                #[cfg(feature = "gl-hdr")]
+                glib::ParamSpecBoolean::builder("gl-hdr")
+                    .nick("Use OpenGL Main-10 HDR bridge")
+                    .blurb(
+                        "Export the compositor's AB30 dma-buf as GLMemory/RGB10A2_LE for \
+                         the NVIDIA Main-10 encoder. HDR-only and disabled by default.",
+                    )
+                    .default_value(false)
+                    .build(),
             ]
         });
 
@@ -413,6 +441,11 @@ impl ObjectImpl for WaylandDisplaySrc {
                 let mut settings = self.settings.lock().unwrap();
                 settings.hdr = value.get::<bool>().expect("Type checked upstream");
             }
+            #[cfg(feature = "gl-hdr")]
+            "gl-hdr" => {
+                let mut settings = self.settings.lock().unwrap();
+                settings.gl_hdr = value.get::<bool>().expect("Type checked upstream");
+            }
             _ => unreachable!(),
         }
     }
@@ -458,6 +491,11 @@ impl ObjectImpl for WaylandDisplaySrc {
             "hdr" => {
                 let settings = self.settings.lock().unwrap();
                 settings.hdr.to_value()
+            }
+            #[cfg(feature = "gl-hdr")]
+            "gl-hdr" => {
+                let settings = self.settings.lock().unwrap();
+                settings.gl_hdr.to_value()
             }
             _ => unreachable!(),
         }
@@ -604,20 +642,31 @@ impl ElementImpl for WaylandDisplaySrc {
 
         #[cfg(feature = "cuda")]
         {
-            let elem = self.obj().upcast_ref::<gst::Element>().to_owned();
-            let cuda_raw_ptr = {
-                let settings = self.settings.lock().unwrap();
-                settings.cuda_raw_ptr.as_ptr()
-            };
-            match CUDAContext::new_from_set_context(&elem, &context, -1, cuda_raw_ptr) {
-                Ok(ctx) => {
-                    let mut settings = self.settings.lock().unwrap();
-                    if settings.cuda_context.is_none() {
-                        settings.cuda_context = Some(Arc::new(Mutex::new(ctx)));
+            // gst_cuda_handle_set_context() returns TRUE without taking a new
+            // reference when the in/out pointer is already populated. Wrapping
+            // that same pointer in a second CUDAContext would therefore unref a
+            // reference it does not own when the temporary wrapper is dropped.
+            // Absorb only the first CUDA context; later propagation is already
+            // satisfied by the context retained in settings.
+            let mut settings = self.settings.lock().unwrap();
+            if settings.cuda_context.is_none() {
+                let elem = self.obj().upcast_ref::<gst::Element>().to_owned();
+                let cuda_raw_ptr = settings.cuda_raw_ptr.as_ptr();
+                match CUDAContext::new_from_set_context(&elem, &context, -1, cuda_raw_ptr) {
+                    Ok(ctx) => {
+                        if settings.cuda_context_acquiring {
+                            // The outer new_from_gstreamer() call will wrap the
+                            // same transfer-full pointer when it returns. Hand
+                            // ownership to that call instead of creating two
+                            // Rust owners for one GObject reference.
+                            std::mem::forget(ctx);
+                        } else {
+                            settings.cuda_context = Some(Arc::new(Mutex::new(ctx)));
+                        }
                     }
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to create CUDA context: {}", e);
+                    Err(e) => {
+                        tracing::warn!("Failed to create CUDA context: {}", e);
+                    }
                 }
             }
         }
@@ -726,6 +775,15 @@ impl BaseSrcImpl for WaylandDisplaySrc {
             if self.handle_vulkan_context_query(query) {
                 return true;
             }
+            #[cfg(feature = "gl-hdr")]
+            {
+                let settings = self.settings.lock().unwrap();
+                if let Some(bridge) = settings.gl_hdr_bridge.as_ref() {
+                    if bridge.handle_context_query(self.obj().upcast_ref(), query) {
+                        return true;
+                    }
+                }
+            }
             let settings = self.settings.lock().unwrap();
             match settings.cuda_context {
                 Some(ref cuda_context) => {
@@ -749,6 +807,15 @@ impl BaseSrcImpl for WaylandDisplaySrc {
         if query.type_() == gst::QueryType::Context && self.handle_vulkan_context_query(query) {
             return true;
         }
+        #[cfg(feature = "gl-hdr")]
+        if query.type_() == gst::QueryType::Context {
+            let settings = self.settings.lock().unwrap();
+            if let Some(bridge) = settings.gl_hdr_bridge.as_ref() {
+                if bridge.handle_context_query(self.obj().upcast_ref(), query) {
+                    return true;
+                }
+            }
+        }
         BaseSrcImplExt::parent_query(self, query)
     }
 
@@ -760,17 +827,51 @@ impl BaseSrcImpl for WaylandDisplaySrc {
             .framerate_range(Fraction::new(1, 1)..Fraction::new(i32::MAX, 1))
             .build();
 
+        // Wolf changes producers from its UI to Steam after the Moonlight
+        // encoder has started. CUDA cannot safely renegotiate that live handoff
+        // between BT.709 and PQ, so HDR advertises one PQ contract from frame one.
+        let hdr_transport = self.settings.lock().unwrap().hdr;
+        let live_colorimetry = if hdr_transport {
+            Some("bt2100-pq")
+        } else {
+            None
+        };
+
         #[cfg(feature = "cuda")]
         {
-            let cuda_caps = gst_video::VideoCapsBuilder::new()
+            let mut cuda_caps = gst_video::VideoCapsBuilder::new()
                 .features([cuda::CAPS_FEATURE_MEMORY_CUDA_MEMORY])
                 .format_list([VideoFormat::Bgra, VideoFormat::Rgba])
                 .height_range(..i32::MAX)
                 .width_range(..i32::MAX)
+                .framerate_range(Fraction::new(1, 1)..Fraction::new(i32::MAX, 1));
+            if let Some(colorimetry) = live_colorimetry {
+                cuda_caps = cuda_caps.field("colorimetry", colorimetry);
+            }
+
+            caps.merge(cuda_caps.build());
+        }
+
+        #[cfg(feature = "gl-hdr")]
+        if self.settings.lock().unwrap().gl_hdr {
+            // `Abgr2101010` is DRM AB30, whose byte layout maps to RGB10A2_LE. The RGB values
+            // are already PQ-coded by the HDR compositor. CUDA must receive the PQ transfer
+            // explicitly before it converts the texture to P010/BT.2020. GStreamer warns that
+            // BT.2020's YUV matrix is not meaningful for RGB, but keeps the RGB matrix and the
+            // SMPTE 2084 transfer; that is the contract cudaconvertscale needs here.
+            let mut gl_caps = gst_video::VideoCapsBuilder::new()
+                .features(["memory:GLMemory"])
+                .format(VideoFormat::Rgb10a2Le)
+                .field("colorimetry", "bt2100-pq")
+                // Keep the marker for older downstream elements, but the standard
+                // colorimetry field above is authoritative for CUDA conversion.
+                .field("wolf-hdr-pq", true)
+                .height_range(..i32::MAX)
+                .width_range(..i32::MAX)
                 .framerate_range(Fraction::new(1, 1)..Fraction::new(i32::MAX, 1))
                 .build();
-
-            caps.merge(cuda_caps);
+            gl_caps.merge(caps);
+            caps = gl_caps;
         }
 
         let state = self.state.lock().unwrap();
@@ -934,20 +1035,15 @@ impl BaseSrcImpl for WaylandDisplaySrc {
         const HDR_COLORIMETRY: &str = "bt2100-pq";
         const HDR_MASTERING: &str = "35400:14600:8500:39850:6550:2300:15635:16450:10000000:1";
         const HDR_CLL: &str = "1000:400";
-        // Effective HDR static metadata. Under WOLF_HDR_CM use the live values the compositor
-        // reported from the game's own color-management signal (frog/gamescope or
-        // wp_color_management/sway) -- so the "HDR Luminance" slider actually flows through to
-        // the encoder's mastering/CLL SEI -- falling back to the hardcoded defaults when the
-        // game provided none. The static `hdr` property path keeps using the defaults verbatim.
-        let (mut hdr_mastering, mut hdr_cll): (String, String) = if hdr_cm {
-            let meta = self.hdr_meta.lock().unwrap();
-            (
-                meta.0.clone().unwrap_or_else(|| HDR_MASTERING.to_string()),
-                meta.1.clone().unwrap_or_else(|| HDR_CLL.to_string()),
-            )
-        } else {
-            (HDR_MASTERING.to_string(), HDR_CLL.to_string())
-        };
+        // Static metadata is part of the negotiated caps, not per-frame picture data. Keep it
+        // fixed for the lifetime of the Moonlight connection. In particular, do not copy the
+        // active surface's mastering/CLL values into caps under WOLF_HDR_CM: interpipesrc asks
+        // each producer to negotiate again when Wolf UI switches to Steam, and a metadata-only
+        // caps difference then tears down the live producer with NOT_NEGOTIATED. The game's
+        // calibrated luminance is still carried by its native PQ pixel values. Operators can
+        // choose another fixed display contract with the environment overrides below.
+        let (mut hdr_mastering, mut hdr_cll) =
+            (HDR_MASTERING.to_string(), HDR_CLL.to_string());
         // Diagnostic / manual override of the static HDR metadata via environment, so the
         // mastering-display peak and content-light-level can be swept at runtime (container
         // restart, no rebuild). `WOLF_HDR_MASTERING` is a full gst mastering-display-info
@@ -1201,6 +1297,53 @@ impl BaseSrcImpl for WaylandDisplaySrc {
             return self.parent_set_caps(caps);
         }
 
+        #[cfg(feature = "gl-hdr")]
+        {
+            let is_gl_hdr = caps
+                .features(0)
+                .is_some_and(|f| f.contains("memory:GLMemory"))
+                && gst_video::VideoInfo::from_caps(caps)
+                    .is_ok_and(|info| info.format() == VideoFormat::Rgb10a2Le);
+            if is_gl_hdr {
+                let base_video_info = gst_video::VideoInfo::from_caps(caps)
+                    .map_err(|_| gst::loggable_error!(CAT, "invalid GL HDR video caps"))?;
+                if !self.settings.lock().unwrap().gl_hdr {
+                    return Err(gst::loggable_error!(CAT, "GL HDR caps negotiated while gl-hdr=false"));
+                }
+                const DRM_FORMAT_AB30: u32 = u32::from_le_bytes(*b"AB30");
+                // The caps query can race the DRM renderer setup on a freshly
+                // created lobby. Until the renderer publishes its DMA formats,
+                // AB30 is temporarily absent even though it will be available
+                // moments later. Treat that as startup, not a permanent error.
+                let format = (0..100)
+                    .find_map(|attempt| {
+                        let format = self
+                            .state
+                            .lock()
+                            .unwrap()
+                            .as_ref()
+                            .and_then(|state| {
+                                state
+                                    .display
+                                    .get_supported_dma_formats()
+                                    .iter()
+                                    .find(|format| format.code as u32 == DRM_FORMAT_AB30)
+                                    .cloned()
+                            });
+                        if format.is_none() && attempt < 99 {
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                        }
+                        format
+                    })
+                    .ok_or_else(|| gst::loggable_error!(CAT, "renderer did not publish AB30 for GL HDR within 1 second"))?;
+                let modifier: u64 = format.modifier.into();
+                let dma_info = VideoInfoDmaDrm::new(base_video_info, format.code as u32, modifier);
+                self.settings.lock().unwrap().gl_hdr_modifier = Some(modifier);
+                let _ = self.command_tx.send(Command::VideoInfo(GstVideoInfo::DMA(dma_info)));
+                return self.parent_set_caps(caps);
+            }
+        }
+
         let video_info = match VideoInfoDmaDrm::from_caps(caps) {
             Ok(dma_video_info) => {
                 self.check_nv12_export(caps, &dma_video_info)?;
@@ -1257,6 +1400,20 @@ impl BaseSrcImpl for WaylandDisplaySrc {
         let mut state = self.state.lock().unwrap();
         if state.is_some() {
             return Ok(());
+        }
+
+        #[cfg(feature = "gl-hdr")]
+        {
+            let mut settings = self.settings.lock().unwrap();
+            if settings.gl_hdr && settings.gl_hdr_bridge.is_none() {
+                settings.gl_hdr_bridge = HdrGlBridge::new();
+                if settings.gl_hdr_bridge.is_none() {
+                    return Err(gst::error_msg!(
+                        LibraryError::Failed,
+                        ("Failed to create the OpenGL 3 HDR bridge")
+                    ));
+                }
+            }
         }
 
         #[cfg(feature = "cuda")]
@@ -1322,12 +1479,15 @@ impl BaseSrcImpl for WaylandDisplaySrc {
                         "Acquiring a CudaContext from the pipeline, you can manually set the `cuda-device-id` property to override this behavior"
                     );
                     let cuda_raw_ptr = {
-                        let settings = self.settings.lock().unwrap();
+                        let mut settings = self.settings.lock().unwrap();
+                        settings.cuda_context_acquiring = true;
                         settings.cuda_raw_ptr.as_ptr()
                     };
-                    match CUDAContext::new_from_gstreamer(&elem, -1, cuda_raw_ptr) {
+                    let result = CUDAContext::new_from_gstreamer(&elem, -1, cuda_raw_ptr);
+                    let mut settings = self.settings.lock().unwrap();
+                    settings.cuda_context_acquiring = false;
+                    match result {
                         Ok(cuda_context) => {
-                            let mut settings = self.settings.lock().unwrap();
                             if settings.cuda_context.is_none() {
                                 tracing::info!("Acquired a CudaContext via new_from_gstreamer");
                                 settings.cuda_context = Some(Arc::new(Mutex::new(cuda_context)));
@@ -1368,6 +1528,12 @@ impl BaseSrcImpl for WaylandDisplaySrc {
             let subscriber = Registry::default().with(GstLayer);
             tracing::subscriber::with_default(subscriber, || drop(state.display));
         }
+        #[cfg(feature = "gl-hdr")]
+        {
+            let mut settings = self.settings.lock().unwrap();
+            settings.gl_hdr_modifier = None;
+            settings.gl_hdr_bridge = None;
+        }
         Ok(())
     }
 
@@ -1391,8 +1557,9 @@ impl PushSrcImpl for WaylandDisplaySrc {
         // change, so this posts at most one message per transition.
         if std::env::var("WOLF_HDR_CM").is_ok() {
             if let Some((hdr, mastering, cll)) = state.display.poll_hdr_state() {
-                // Store the active surface's real mastering / CLL metadata so the next
-                // `caps()` stamps it onto the P010 HDR caps (else the hardcoded defaults).
+                // Retain this for diagnostics. It must not be copied into negotiated caps:
+                // changing static metadata during a Wolf UI -> app switch causes interpipe to
+                // renegotiate and can terminate the producer with NOT_NEGOTIATED.
                 *self.hdr_meta.lock().unwrap() = (mastering, cll);
                 let elem = self.obj().upcast_ref::<gst::Element>().to_owned();
                 let structure = Structure::builder("wolf-hdr-state")
@@ -1404,14 +1571,12 @@ impl PushSrcImpl for WaylandDisplaySrc {
                     gst::warning!(CAT, "Failed to post wolf-hdr-state message: {}", err);
                 }
 
-                // Keep the negotiated P010/PQ transport stable. Reconfiguring caps for every
-                // SDR<->HDR surface transition makes the encoder renegotiate, which produces
-                // flicker and can fail because the downstream Wolf pipeline is already fixed to
-                // P010 HDR. The Vulkan converter uses the compositor's per-frame PQ flag instead.
+                // The CUDA/NVENC transport contract remains fixed. Changing caps during
+                // the Wolf UI -> Steam handoff would tear down the live Moonlight stream.
                 if self.hdr_active.swap(hdr, Ordering::Relaxed) != hdr {
                     gst::info!(
                         CAT,
-                        "WOLF_HDR_CM: compositor HDR state changed to {}; keeping stable HDR10/PQ transport",
+                        "WOLF_HDR_CM: compositor HDR state changed to {}; keeping the CUDA PQ transport contract",
                         hdr
                     );
                 }
@@ -1419,9 +1584,30 @@ impl PushSrcImpl for WaylandDisplaySrc {
         }
 
         let subscriber = Registry::default().with(GstLayer);
-        tracing::subscriber::with_default(subscriber, || {
-            state.display.frame().map(CreateSuccess::NewBuffer)
-        })
+        let (buffer, native_pq) =
+            tracing::subscriber::with_default(subscriber, || state.display.frame_with_input_hdr())?;
+        drop(state_guard);
+
+        #[cfg(feature = "gl-hdr")]
+        {
+            let settings = self.settings.lock().unwrap();
+            if let (Some(bridge), Some(modifier)) =
+                (settings.gl_hdr_bridge.as_ref(), settings.gl_hdr_modifier)
+            {
+                let (width, height) = {
+                    let info = buffer
+                    .meta::<gst_video::VideoMeta>()
+                    .ok_or(gst::FlowError::Error)?;
+                    (info.width(), info.height())
+                };
+                let converted = bridge
+                    .import_ab30(buffer, width, height, modifier, native_pq)
+                    .ok_or(gst::FlowError::Error)?;
+                return Ok(CreateSuccess::NewBuffer(converted));
+            }
+        }
+
+        Ok(CreateSuccess::NewBuffer(buffer))
     }
 }
 

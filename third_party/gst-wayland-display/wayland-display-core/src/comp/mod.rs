@@ -862,9 +862,15 @@ pub(crate) fn init(
                             state.should_quit = true;
                             return;
                         }
+                        // Capture before `create_frame()` lends the renderer from `state`.
+                        // The classification was established by the most recent committed
+                        // client buffer, so it already applies to the frame about to render.
+                        let frame_is_native_pq = state.current_input_is_pq;
                         if let Err(_) = match state.create_frame() {
                             Ok((buf, render_result)) => {
-                                let res = buffer_sender.send(Ok(buf));
+                                // Return the classification captured for this frame with its
+                                // rendered buffer.
+                                let res = buffer_sender.send(Ok((buf, frame_is_native_pq)));
                                 let rendered_states = &render_result.states;
                                 let rendered_damage = render_result.damage.is_some();
 

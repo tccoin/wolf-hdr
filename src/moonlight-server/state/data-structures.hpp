@@ -62,6 +62,15 @@ inline int get_port(STANDARD_PORTS_MAPPING port) {
 using PairedClientList = immer::vector<immer::box<wolf::config::PairedClient>>;
 using ProfilesList = immer::vector<immer::box<events::Profile>>;
 
+/**
+ * Small, safe-to-change service settings. Unlike encoder and compositor
+ * configuration these are consulted at the time an action is taken, so they
+ * can be updated from Wolf UI without restarting an active stream.
+ */
+struct RuntimeSettings {
+  int single_player_disconnect_grace_seconds = 10 * 60;
+};
+
 enum Encoder {
   NVIDIA,
   VAAPI,
@@ -97,6 +106,10 @@ struct Config {
    * Profiles will be shown in WolfUI
    */
   std::shared_ptr<immer::atom<ProfilesList>> profiles;
+
+  /** Runtime-tunable settings which are also persisted in config.toml. */
+  std::shared_ptr<immer::atom<RuntimeSettings>> runtime_settings =
+      std::make_shared<immer::atom<RuntimeSettings>>();
 };
 
 /**

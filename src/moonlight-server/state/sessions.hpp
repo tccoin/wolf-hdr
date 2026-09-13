@@ -36,6 +36,14 @@ inline std::optional<events::StreamSession> get_session_by_client(const immer::v
   return get_session_by_id(sessions, client_id);
 }
 
+inline bool has_same_video_output_contract(const events::StreamSession &current,
+                                           const events::StreamSession &requested) {
+  return current.display_mode.width == requested.display_mode.width &&
+         current.display_mode.height == requested.display_mode.height &&
+         current.display_mode.refreshRate == requested.display_mode.refreshRate &&
+         current.hdr_output_requested == requested.hdr_output_requested;
+}
+
 inline std::optional<events::Lobby> get_lobby_by_id(const immer::vector<events::Lobby> &lobbies,
                                                     std::string_view lobby_id) {
   auto results = lobbies |                                                                                      //
@@ -73,7 +81,8 @@ inline std::shared_ptr<events::StreamSession> create_stream_session(immer::box<s
                                                                     const moonlight::DisplayMode &display_mode,
                                                                     int audio_channel_count,
                                                                     const std::string &aes_key,
-                                                                    const std::string &aes_iv) {
+                                                                    const std::string &aes_iv,
+                                                                    bool hdr_output_requested = false) {
   auto full_path = std::filesystem::path(state->host->local_base_state_folder) / current_client.app_state_folder /
                    run_app.base.title;
   logs::log(logs::debug, "Host app state folder: {}, creating paths", full_path.string());
@@ -96,6 +105,7 @@ inline std::shared_ptr<events::StreamSession> create_stream_session(immer::box<s
   auto session = events::StreamSession{
       .display_mode = display_mode,
       .audio_channel_count = audio_channel_count,
+      .hdr_output_requested = hdr_output_requested,
       .event_bus = state->event_bus,
       .client_settings = current_client.settings,
       .app = std::make_shared<events::App>(run_app),

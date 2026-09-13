@@ -26,15 +26,18 @@ use std::fs::File;
 use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::sync::{Arc, Mutex};
 
-/// RGBA render-target fourcc for the compositor's GLES render target (which is *also* the
-/// Vulkan converter's input dmabuf). Normally the 8-bit `Abgr8888`. When either `WOLF_HDR_SPIKE`
-/// (synthetic-bars spike) or `WOLF_HDR_CM` (real HDR client content) is set this becomes the
-/// 64bpp fp16 `Abgr16161616f` so the render target can carry linear values > 1.0 (HDR
-/// highlights) into the Vulkan P010/PQ converter instead of clamping them at 8-bit white.
-/// Both unset = byte-for-byte the current 8-bit path.
-fn rgba_render_fourcc() -> DrmFourcc {
-    if std::env::var("WOLF_HDR_SPIKE").is_ok() || std::env::var("WOLF_HDR_CM").is_ok() {
+/// RGBA render-target fourcc for the compositor's GLES render target (which is also the Vulkan
+/// converter's input dmabuf). Keep the normal SDR output on Wolf's native 8-bit target. For a
+/// P010 HDR transport normally keeps the driver's stable AB24 target and converts SDR content to
+/// PQ in the Vulkan shader. This is an HDR *transport* fallback: it is safe at ultrawide modes,
+/// but it cannot carry a native PQ surface losslessly. AB30 is available only behind an explicit
+/// experiment flag because the NVIDIA cross-API import loses its Vulkan device at 3440x1440.
+/// The synthetic spike remains the sole fp16 user.
+fn rgba_render_fourcc(fmt: Option<PixFmt>) -> DrmFourcc {
+    if std::env::var("WOLF_HDR_SPIKE").is_ok() {
         DrmFourcc::Abgr16161616f
+    } else if std::env::var("WOLF_HDR_AB30_TEST").is_ok() && fmt == Some(PixFmt::P010) {
+        DrmFourcc::Abgr2101010
     } else {
         DrmFourcc::Abgr8888
     }
@@ -50,7 +53,7 @@ pub struct GsGlesbuffer {
 impl GsGlesbuffer {
     pub fn new(renderer: &mut GlesRenderer, video_info: VideoInfo) -> Option<Self> {
         let format = Fourcc::try_from(video_info.format().to_fourcc())
-            .unwrap_or_else(|_| rgba_render_fourcc());
+            .unwrap_or_else(|_| rgba_render_fourcc(None));
 
         let result = renderer.create_buffer(
             format,
@@ -179,6 +182,11 @@ fn is_amd_dcc_modifier(m: Modifier) -> bool {
 ///     the import mis-samples (image "jumps"/shifts, cursor dropped). DCC stays in the list
 ///     as a last resort so we never end up with *no* buffer.
 fn rgba_modifier_order(mods: &[Modifier], is_nvidia: bool) -> Vec<Modifier> {
+    if std::env::var("WOLF_EGL_LINEAR").is_ok() {
+        return std::iter::once(Modifier::Linear)
+            .chain(mods.iter().copied())
+            .collect();
+    }
     if is_nvidia {
         return mods
             .iter()
@@ -209,11 +217,10 @@ impl GsNv12Buf {
         fmt: PixFmt,
     ) -> Option<Self> {
         let (w, h) = (video_info.width(), video_info.height());
-        // RGBA render-target fourcc: 8-bit Abgr8888, or fp16 Abgr16161616f under WOLF_HDR_SPIKE.
-        let rgba_fourcc = rgba_render_fourcc();
+        let rgba_fourcc = rgba_render_fourcc(Some(fmt));
         tracing::info!(
-            "GsNv12Buf: RGBA render-target fourcc = {rgba_fourcc:?} (HDR spike: {})",
-            rgba_fourcc == DrmFourcc::Abgr16161616f
+            "GsNv12Buf: RGBA render-target fourcc = {rgba_fourcc:?} (HDR P010: {})",
+            fmt == PixFmt::P010
         );
         // RGBA render-target modifier candidates the GLES renderer supports (INVALID last).
         let formats =
@@ -289,11 +296,13 @@ impl GsVulkanBuf {
     ) -> Option<Self> {
         let (w, h) = (video_info.width(), video_info.height());
 
-        // RGBA render-target fourcc: 8-bit Abgr8888, or fp16 Abgr16161616f under WOLF_HDR_SPIKE.
-        let rgba_fourcc = rgba_render_fourcc();
+        // Choose the target after reading the negotiated output format, so an SDR request keeps
+        // Wolf's native AB24 path even while HDR colour-management support is available.
+        let fmt = PixFmt::from_gst(video_info.format());
+        let rgba_fourcc = rgba_render_fourcc(Some(fmt));
         tracing::info!(
-            "GsVulkanBuf: RGBA render-target fourcc = {rgba_fourcc:?} (HDR spike: {})",
-            rgba_fourcc == DrmFourcc::Abgr16161616f
+            "GsVulkanBuf: RGBA render-target fourcc = {rgba_fourcc:?} (HDR P010: {})",
+            fmt == PixFmt::P010
         );
         // RGBA render-target modifier (same policy as GsNv12Buf: LINEAR except on Nvidia).
         let formats =
@@ -325,7 +334,6 @@ impl GsVulkanBuf {
         let raw = crate::utils::vulkan_share::raw_handles(&dev)?;
         // NV12 (8-bit, vulkanh264enc) or P010 (10-bit, vulkanh265enc Main-10) per the
         // negotiated memory:VulkanImage format.
-        let fmt = PixFmt::from_gst(video_info.format());
         let format_str = match fmt {
             PixFmt::Nv12 => "NV12",
             PixFmt::P010 => "P010_10LE",

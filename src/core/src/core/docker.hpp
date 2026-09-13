@@ -116,6 +116,9 @@ public:
    */
   bool start_by_id(std::string_view id) const;
 
+  /** Restarts a container by Docker ID or name. */
+  bool restart_by_id(std::string_view id, int timeout_seconds = 10) const;
+
   /**
    * Stops the container
    *

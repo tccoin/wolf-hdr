@@ -318,7 +318,7 @@ base_create_json = """
 
 [gstreamer.video]
 
-default_source = 'interpipesrc name=interpipesrc_{}_video listen-to={session_id}_video is-live=true stream-sync=restart-ts max-bytes=0 max-buffers=1 leaky-type=downstream'
+default_source = 'interpipesrc name=interpipesrc_{}_video listen-to={session_id}_video is-live=true format=time stream-sync=restart-ts allow-renegotiation=false accept-events=false accept-eos-event=false max-bytes=0 max-buffers=1 leaky-type=downstream'
 default_sink = """
 rtpmoonlightpay_video name=moonlight_pay \
 payload_size={payload_size} fec_percentage={fec_percentage} min_required_fec_packets={min_required_fec_packets} !
@@ -330,16 +330,17 @@ appsink sync=false name=wolf_udp_sink
 # To avoid repetition between H264, HEVC and AV1 encoders
 [gstreamer.video.defaults.nvcodec]
 video_params = """
+queue max-size-buffers=4 leaky=downstream !
 cudaupload !
-cudaconvertscale add-borders=true !
 video/x-raw(memory:CUDAMemory), width={width}, height={height}, \
 chroma-site={color_range}, format=NV12, colorimetry={color_space}, pixel-aspect-ratio=1/1\
 """
 
 video_params_zero_copy = """
+queue max-size-buffers=4 leaky=downstream !
 cudaupload !
-cudaconvertscale add-borders=true !
-video/x-raw(memory:CUDAMemory),format=NV12, width={width}, height={height}, pixel-aspect-ratio=1/1
+video/x-raw(memory:CUDAMemory), width={width}, height={height}, \
+chroma-site={color_range}, format=NV12, colorimetry={color_space}, pixel-aspect-ratio=1/1
 """
 
 [gstreamer.video.defaults.qsv]
@@ -372,9 +373,9 @@ video/x-raw(memory:VAMemory), format=NV12, width={width}, height={height}, pixel
 ###
 [[gstreamer.video.hevc_encoders]]
 plugin_name = "nvcodec"
-check_elements = ["nvh265enc", "cudaconvertscale", "cudaupload"]
+check_elements = ["nvh265enc", "cudaupload", "vulkandownload"]
 encoder_pipeline = """
-nvh265enc gop-size=-1 bitrate={bitrate} aud=false rc-mode=cbr zerolatency=true preset=p1 tune=ultra-low-latency multi-pass=two-pass-quarter !
+nvh265enc gop-size=-1 bitrate={bitrate} aud=false rc-mode=cbr zerolatency=true preset=p1 tune=ultra-low-latency multi-pass=disabled !
 h265parse !
 video/x-h265, profile=main, stream-format=byte-stream\
 """

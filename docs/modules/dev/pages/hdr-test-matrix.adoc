@@ -1,0 +1,168 @@
+= HDR transport test matrix
+:toc:
+
+This page records the HDR investigation state for the NVIDIA/NVENC Wolf deployment. It is a
+test gate, not a list of experiments to run repeatedly. A row marked *blocked* must only be
+rerun after the stated variable has changed and the GPU context has been recovered.
+
+== Current state
+
+The restored runtime is `local/wolf:hdr-native-gl-pq`.  It contains one ABI-matched GStreamer
+1.28 NVENC/CUDA/GL stack plus NVRTC.  Do not rebuild the deployed runtime from the smaller
+`hdr-nvcodec` base: that base lacks the CUDA component needed by the native HDR candidates.
+
+The live HDR video pipeline observed in Wolf logs is:
+
+[source]
+....
+interpipesrc ! video/x-raw(memory:GLMemory),format=RGB10A2_LE,
+wolf-hdr-pq=true ! nvh265enc ! h265parse !
+video/x-h265,profile=main-10
+....
+
+This is the path on which Cyberpunk HDR was physically verified as correct.  Although the image
+also exposes `cudaconvertscale`, the live native GL pipeline above does *not* insert that element.
+Do not infer the active conversion path merely from `gst-inspect-1.0` output.
+
+The game library remains in `/etc/wolf/profile-data/user/WolfSteam`; no test may initialise,
+delete, or replace that folder.
+
+== Deployment and diagnosis runbook
+
+Before changing any HDR code or container image, collect the following evidence from one fresh
+Moonlight session:
+
+. Confirm the image and required plugins:
++
+[source]
+....
+docker inspect -f '{{.Image}}' wayland_streaming-wolf-1
+docker exec wayland_streaming-wolf-1 sh -ec \
+  'gst-inspect-1.0 nvh265enc >/dev/null; gst-inspect-1.0 cudaconvertscale >/dev/null'
+....
+
+. Inspect the actual running encoder, rather than a configured template:
++
+[source]
+....
+docker logs wayland_streaming-wolf-1 2>&1 | \
+  sed -n '/Starting video pipeline:/,/appsink sync=false/p'
+....
+
+. For native HDR, require `memory:GLMemory`, `RGB10A2_LE`, `wolf-hdr-pq=true`, and HEVC
+  `profile=main-10`.  A real HDR Moonlight display must verify colour; headless/Xvfb Moonlight
+  can verify connection, resolution, codec and frame delivery but not HDR appearance.
+
+. If the pipeline instead contains `vulkandownload ! video/x-raw ! cudaupload`, stop: that is
+  the known CPU P010 fallback (E1) and is expected to run at roughly 10 FPS at ultrawide. Restore
+  `hdr-native-gl-pq`; do not tune bit rate, metadata, or Moonlight flags to compensate.
+
+. If `cudaconvertscale` is missing, do not switch to the CPU P010 fallback. Restore the
+  ABI-matched runtime image (or rebuild it using `docker/wolf.nvcodec-runtime.Dockerfile`) and
+  verify it before deployment.
+
+== Evidence already collected
+
+[cols="1,2,1,3",options="header"]
+|===
+|ID |Route |Result |Decision
+
+|E1
+|P010 Vulkan producer -> `vulkandownload` -> P010 system memory -> `cudaupload` -> `nvh265enc`
+|About 10.8 FPS in a 3440x1440 P010 throughput test.
+|Fail for 165 Hz. Do not rerun unchanged; the CPU round trip is the known bottleneck.
+
+|E2
+|P010 Vulkan producer -> `vulkandownload` only
+|About 155 FPS after warm-up in an isolated producer benchmark.
+|Useful baseline only. It proves the producer can approach 165 Hz, not that NVENC transport can.
+
+|E3
+|P010 Vulkan producer -> `vulkanh265enc` through the existing interpipe session wiring
+|Pipeline could not link in the current app/interpipe configuration.
+|Blocked. Retry only after changing the Vulkan encoder ownership/caps hand-off.
+
+|E4
+|HDR compositor with `WOLF_HDR_CM=1`, fp16 `AB4H` render target, NVENC transport
+|Wolf logged `ERROR_DEVICE_LOST`; kernel logged NVIDIA `Xid 32`.
+|Blocked. Never rerun this fp16 target unchanged. A new target format or import/synchronisation path is required first.
+
+|E5
+|SDR connection after E4
+|Moonlight negotiated 3440x1440@165 Main profile, then received no video. Kernel also logged a GPU virtual-address mapping assertion.
+|Inconclusive. The preceding Xid poisoned the test environment; this is not an independent SDR failure.
+
+|E6
+|HDR session negotiation
+|Moonlight received a 3440x1440@165 HEVC Main 10 stream description.
+|Protocol pass only. It does not certify steady frame rate, PQ pixels, or display colour.
+
+|E7
+|AB30 10-bit compositor target with NVENC transport
+|It reaches HEVC Main 10 at 1080p, but its `3440x1440@165` Vulkan import returns `ERROR_DEVICE_LOST`.
+|Do not rerun AB30 at ultrawide resolution. Use the AB24 SDR-to-PQ HDR-transport fallback while investigating a true 10-bit path.
+
+|E8
+|AB24 compositor -> SDR-to-PQ P010 HDR transport -> NVENC at `3440x1440@165`
+|The compositor creates AB24, then the same Vulkan output/export stage returns `ERROR_DEVICE_LOST`.
+|The fault is in the HDR Vulkan export path at ultrawide resolution, not solely the AB30 render-target format. Do not retest this route unchanged.
+
+|E9
+|CUDA source (`BGRA`) -> `cudaconvertscale` -> P010 -> NVENC at `3440x1440@165`
+|The isolated source/convert stage reached about 151 FPS; adding HEVC Main 10 NVENC reached about 132–138 FPS without device loss. Low-latency NVENC modes and constant-QP did not materially change it.
+|Useful stability fallback and profiling baseline, but not a 165 Hz candidate. It also cannot preserve a native 10-bit PQ game surface because its compositor target is 8-bit BGRA.
+
+|E10
+|CUDA source direct 10-bit `RGB10A2_LE` / DRM AB30 -> NVENC Main 10
+|The AB30 EGL image could not be registered by CUDA: `CUDA_ERROR_INVALID_VALUE`; the source then panicked and the pipeline stopped as not-negotiated.
+|Blocked. Do not retry the same EGL-to-CUDA 10-bit registration path. A new NVIDIA interop implementation is required, not another caps or encoder setting change.
+
+|E11
+|Pure SDR at `3440x1440@165`
+|Wolf used `waylanddisplaysrc` raw output followed by `cudaupload ! cudaconvertscale ! nvh265enc`; the receiver decoded a HEVC Main frame and the server ran to client timeout without a producer error, device loss, or Xid.
+|Pass for a stable native SDR route. The headless test client could not provide reliable FPS statistics because its Xvfb renderer exited during shutdown.
+
+|E12
+|Native GLMemory `RGB10A2_LE` -> NVENC Main-10 (`hdr-native-gl-pq`)
+|The ABI-matched GStreamer GL/CUDA/NVENC runtime and NVRTC were restored. Wolf logs show the native `GLMemory`, `RGB10A2_LE`, `wolf-hdr-pq=true` producer directly feeding `nvh265enc`; Cyberpunk HDR was physically verified with correct colour.
+|Current deployment baseline. Preserve this image and verify the actual log pipeline after any rebuild or configuration change.
+|===
+
+== Remaining tests, in order
+
+[cols="1,2,3,2",options="header"]
+|===
+|ID |Single new variable |Method |Pass criteria
+
+|T1
+|Implement a source-side OpenGL `RGB10A2_LE` allocator/output path, with GStreamer GL and NVENC GL support both compiled in.
+|Keep the compositor's AB30 rendering in its existing GL context and export it as GLMemory to `glcolorconvert -> nvh265enc`. Run a short dynamic HDR producer test after the GPU context is clean. Capture Wolf log, kernel log, encoder caps, and a shader-independent PQ pixel check.
+|No Xid/device loss for 120 seconds; P010 BT.2100/PQ reaches the selected encoder.
+
+|T2
+|Use the T1 path with NVENC.
+|Run a dynamic 3440x1440 producer at 165 Hz and measure source, encoder, and receiver rates separately.
+|The transport sustains 165 FPS without CPU P010 download/upload. A game rendering below 165 FPS is reported as game performance, not a transport failure.
+
+|T3
+|Start Steam and Cyberpunk on the stable T1/T2 HDR path.
+|Inspect the running Proton/DXVK logs for HDR swapchain creation, gamescope surface format, Wolf PQ caps, HEVC Main 10, and stream rate.
+|Cyberpunk process is running; native HDR swapchain and PQ/Main 10 are present; no stream restart or colour-contract change occurs when Steam hands off to the game.
+
+|T4
+|Request SDR from the same build.
+|Start a fresh SDR session after T3 is stopped; inspect NV12/BT.709 caps and HEVC Main.
+|Steam and a dynamic desktop surface run for 120 seconds with no HDR metadata, no flicker, and no device loss.
+
+|T5
+|Physical HDR client validation.
+|Use a real HDR-capable Moonlight display to compare an SDR reference screen and Cyberpunk HDR calibration screen.
+|PQ image is not washed out and SDR UI is not over-bright. A virtual Xvfb client cannot certify this final visual result.
+|===
+
+== Rules for the next run
+
+* Do not replace the restored native GL runtime with the CPU P010 download/upload path.
+* Do not use the CPU P010 download/upload path as a performance candidate.
+* Stop each test session and confirm no game process remains before changing a route.
+* Record a new row only when a code/configuration variable changed or the test answers a previously unmeasured question.

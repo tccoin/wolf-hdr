@@ -18,6 +18,7 @@
 ** xref:dev:api.adoc[]
 ** xref:dev:code-structure.adoc[]
 ** xref:dev:gstreamer.adoc[]
+** xref:dev:hdr-test-matrix.adoc[HDR runtime runbook]
 ** xref:dev:wayland.adoc[]
 ** xref:dev:fake-udev.adoc[]
 

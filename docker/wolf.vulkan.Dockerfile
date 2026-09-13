@@ -48,10 +48,16 @@ RUN --mount=type=cache,target=/cache/ccache \
     -DBUILD_SHARED_LIBS=OFF \
     -DBoost_USE_STATIC_LIBS=ON \
     -DBUILD_FAKE_UDEV_CLI=ON \
-    -DBUILD_TESTING=OFF \
+    -DBUILD_TESTING=ON \
+    -DTEST_RUST_WAYLAND=OFF \
+    -DTEST_NVIDIA=OFF \
+    -DTEST_VIRTUAL_INPUT=OFF \
+    -DTEST_DOCKER=OFF \
     -G Ninja && \
     ninja -C $CMAKE_BUILD_DIR wolf && \
     ninja -C $CMAKE_BUILD_DIR fake-udev && \
+    ninja -C $CMAKE_BUILD_DIR wolftests && \
+    (cd $CMAKE_BUILD_DIR/tests && ./wolftests '[Streaming][HDR]') && \
     cp $CMAKE_BUILD_DIR/src/moonlight-server/wolf /wolf/wolf && \
     cp $CMAKE_BUILD_DIR/src/fake-udev/fake-udev /wolf/fake-udev
 
@@ -80,6 +86,13 @@ COPY docker/supervisord.conf /etc/supervisord.conf
 # LD_LIBRARY_PATH are already exported there); register /opt/gst/lib64 with the
 # dynamic linker so wolf and gst-inspect resolve the gstreamer .so's at runtime.
 RUN echo /opt/gst/lib64 > /etc/ld.so.conf.d/gst-vulkan.conf && ldconfig
+
+# The NVIDIA container runtime injects the GBM allocator under the Debian
+# multiarch path, while the Fedora userspace in this image looks under
+# /usr/lib64/gbm when GBM_BACKEND=nvidia-drm is selected.  Provide the path
+# expected by Mesa/Smithay so the KMS compositor can import NVIDIA EGLImages.
+RUN mkdir -p /usr/lib64/gbm && \
+    ln -sf /usr/lib/x86_64-linux-gnu/gbm/nvidia-drm_gbm.so /usr/lib64/gbm/nvidia-drm_gbm.so
 
 WORKDIR /wolf
 ENV WOLF_CFG_FOLDER=/etc/wolf/cfg

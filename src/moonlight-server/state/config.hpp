@@ -192,6 +192,12 @@ std::optional<PairedClient> get_client_by_id(const Config &cfg, const std::strin
 void update_client_settings(const Config &cfg, std::size_t client_id, const PairedClient &updated_client);
 
 /**
+ * Replaces runtime settings, applies them immediately, and persists them to
+ * the Wolf TOML configuration.
+ */
+void update_runtime_settings(const Config &cfg, const RuntimeSettings &settings);
+
+/**
  * Replaces the currently loaded profiles
  * Side effects: will save back the configuration to disk
  */

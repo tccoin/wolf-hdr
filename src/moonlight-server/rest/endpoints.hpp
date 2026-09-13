@@ -381,14 +381,13 @@ auto create_run_session(const SimpleWeb::CaseInsensitiveMultimap &headers,
                                          state->config->support_hevc,
                                          state->config->support_av1};
 
-  // The Vulkan zero-copy producer renders the virtual compositor at this resolution,
-  // and the Vulkan encoder requires 64px CTB alignment (see rtsp/commands.hpp, which
-  // rounds the *encoder* dimension up). The compositor is created HERE, at /launch,
-  // before RTSP, so it must be rounded too -- otherwise the producer fills only the
-  // requested rows while the encoder reads full 64px CTBs, leaving the extra rows
-  // uninitialised (a green bar along the bottom edge). Scoped to the Vulkan producer;
-  // the client scales the slightly-larger frame back into its viewport.
-  if (run_app.video_producer_buffer_caps.find("VulkanImage") != std::string::npos) {
+  // Only the Vulkan video encoders require 64px CTB alignment. A VulkanImage producer
+  // feeding NVENC does not, and rounding that path changes a requested 1920x1080 desktop
+  // into 1920x1088 all the way through gamescope.
+  const bool uses_vulkan_encoder =
+      run_app.h264_gst_pipeline.find("vulkanh264enc") != std::string::npos ||
+      run_app.hevc_gst_pipeline.find("vulkanh265enc") != std::string::npos;
+  if (uses_vulkan_encoder && run_app.video_producer_buffer_caps.find("VulkanImage") != std::string::npos) {
     auto round_up_64 = [](int v) { return (v + 63) & ~63; };
     display_mode.width = round_up_64(display_mode.width);
     display_mode.height = round_up_64(display_mode.height);
@@ -396,6 +395,14 @@ auto create_run_session(const SimpleWeb::CaseInsensitiveMultimap &headers,
 
   auto surround_info = std::stoi(get_header(headers, "surroundAudioInfo").value_or("196610"));
   int channelCount = surround_info & (0xffff /* last 16 bits */);
+  const bool hdr_output_requested =
+      run_app.base.support_hdr && get_header(headers, "hdrMode").value_or("0") == "1";
+  logs::log(logs::info,
+            "[HTTP] {} output requested for {}x{}@{}",
+            hdr_output_requested ? "HDR" : "SDR",
+            display_mode.width,
+            display_mode.height,
+            display_mode.refreshRate);
 
   auto base_session = create_stream_session(state,
                                             run_app,
@@ -403,7 +410,8 @@ auto create_run_session(const SimpleWeb::CaseInsensitiveMultimap &headers,
                                             display_mode,
                                             channelCount,
                                             get_header(headers, "rikey").value(),
-                                            get_header(headers, "rikeyid").value());
+                                            get_header(headers, "rikeyid").value(),
+                                            hdr_output_requested);
 
   base_session->ip = client_ip;
   return std::move(base_session);
@@ -464,22 +472,44 @@ void resume(const std::shared_ptr<typename SimpleWeb::Server<SimpleWeb::HTTPS>::
   if (old_session) {
     auto new_session =
         create_run_session(request->parse_query_string(), client_ip, current_client, state, *old_session->app);
-    // Carry over the old session display handle
-    new_session->wayland_display = std::move(old_session->wayland_display);
-    // Carry over the old session devices, they'll be already plugged into the container
-    new_session->mouse = std::move(old_session->mouse);
-    new_session->keyboard = std::move(old_session->keyboard);
-    new_session->joypads = std::move(old_session->joypads);
-    new_session->pen_tablet = std::move(old_session->pen_tablet);
-    new_session->touch_screen = std::move(old_session->touch_screen);
+    if (state::has_same_video_output_contract(*old_session, *new_session)) {
+      // A transport reconnect with an identical mode can keep the compositor and
+      // application alive. Only the RTP/crypto session is refreshed.
+      new_session->wayland_display = std::move(old_session->wayland_display);
+      new_session->mouse = std::move(old_session->mouse);
+      new_session->keyboard = std::move(old_session->keyboard);
+      new_session->joypads = std::move(old_session->joypads);
+      new_session->pen_tablet = std::move(old_session->pen_tablet);
+      new_session->touch_screen = std::move(old_session->touch_screen);
 
-    state->running_sessions->update([&old_session, new_session](const immer::vector<events::StreamSession> ses_v) {
-      return state::remove_session(ses_v, old_session.value()).push_back(*new_session);
-    });
+      state->running_sessions->update([&old_session, new_session](const immer::vector<events::StreamSession> ses_v) {
+        return state::remove_session(ses_v, old_session.value()).push_back(*new_session);
+      });
+    } else {
+      logs::log(logs::info,
+                "[HTTP] Video output contract changed from {}x{}@{} {} to {}x{}@{} {}; restarting compositor",
+                old_session->display_mode.width,
+                old_session->display_mode.height,
+                old_session->display_mode.refreshRate,
+                old_session->hdr_output_requested ? "HDR" : "SDR",
+                new_session->display_mode.width,
+                new_session->display_mode.height,
+                new_session->display_mode.refreshRate,
+                new_session->hdr_output_requested ? "HDR" : "SDR");
+
+      // Stop the old generation before publishing the replacement because both
+      // generations intentionally share the stable Moonlight client session id.
+      state->event_bus->fire_event(
+          immer::box<events::StopStreamEvent>(events::StopStreamEvent{.session_id = old_session->session_id}));
+      state->running_sessions->update(
+          [new_session](const immer::vector<events::StreamSession> &ses_v) { return ses_v.push_back(*new_session); });
+      state->event_bus->fire_event(immer::box<events::StreamSession>(*new_session));
+    }
 
     auto rtsp_ip = get_rtsp_ip_string(get_host_ip<SimpleWeb::HTTPS>(request, state), *new_session);
     auto xml = moonlight::launch_resume(rtsp_ip, std::to_string(get_port(state::RTSP_SETUP_PORT)));
     send_xml<SimpleWeb::HTTPS>(response, SimpleWeb::StatusCode::success_ok, xml);
+    return;
   } else {
     logs::log(logs::warning, "[HTTPS] Received resume event from an unregistered session, ip: {}", client_ip);
   }

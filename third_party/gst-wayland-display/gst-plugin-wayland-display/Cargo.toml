@@ -19,6 +19,7 @@ static = []
 capi = []
 doc = []
 cuda = ["wayland-display-core/cuda"]
+gl-hdr = []
 
 [dependencies]
 gst.workspace = true
@@ -34,6 +35,8 @@ input-event-codes-sys = "0.1.0"
 
 [build-dependencies]
 gst-plugin-version-helper = "0.7.5"
+cc = "1.2"
+pkg-config = "0.3"
 
 [package.metadata.capi]
 min_version = "0.9.21"
@@ -47,4 +50,4 @@ versioning = false
 import_library = false
 
 [package.metadata.capi.pkg_config]
-requires_private = "gstreamer-1.0, gstreamer-base-1.0, gstreamer-video-1.0, gobject-2.0, glib-2.0, gmodule-2.0"
+requires_private = "gstreamer-1.0, gstreamer-base-1.0, gstreamer-video-1.0, gstreamer-gl-1.0, gobject-2.0, glib-2.0, gmodule-2.0"

@@ -54,8 +54,31 @@ void RunDocker::run(std::string_view session_id,
                              .cgroup_permission = "mrw"});
   }
 
+  // Steam Input creates an XInput-compatible virtual controller through uinput.
+  // The physical Moonlight controller is already injected as /dev/input/event*,
+  // which is sufficient for Steam's UI, but Proton games such as Cyberpunk only
+  // receive Steam Input's translated controller when /dev/uinput is available.
+  // Keep this capability scoped to the Steam runner instead of granting it to
+  // every Wolf application container.
+  std::error_code uinput_error;
+  if (this->container.name == "WolfSteam" &&
+      std::filesystem::is_character_file("/dev/uinput", uinput_error)) {
+    devices.push_back(Device{.path_on_host = "/dev/uinput",
+                             .path_in_container = "/dev/uinput",
+                             .cgroup_permission = "mrw"});
+  }
+
   std::vector<MountPoint> mounts;
   mounts.insert(mounts.end(), this->container.mounts.begin(), this->container.mounts.end());
+  // Steam Input's XInput emulation is created after the container starts.  A
+  // per-node device mapping is therefore insufficient: the new event node
+  // never becomes visible to Proton.  Give only the Steam runner a live,
+  // read-only view of the input directory so both the Moonlight pad and the
+  // Steam-created virtual pad remain visible for the whole session.
+  if (this->container.name == "WolfSteam" &&
+      std::filesystem::is_directory("/dev/input", uinput_error)) {
+    mounts.push_back(MountPoint{.source = "/dev/input", .destination = "/dev/input", .mode = "ro"});
+  }
   for (const auto &path : paths) {
     mounts.insert(mounts.end(), MountPoint{.source = path.first, .destination = path.second, .mode = "rw"});
   }
@@ -241,7 +264,10 @@ void RunDocker::run(std::string_view session_id,
               if (udev_ev.count("DEVNAME") == 0) {
                 cmd = fmt::format("fake-udev -m {}", udev_msg);
               } else {
-                cmd = fmt::format("fake-udev -m {} && rm {}", udev_msg, udev_ev["DEVNAME"]);
+                // With a read-only host /dev/input bind the kernel owns this
+                // node.  Deliver the udev removal event without failing if the
+                // local namespace is not allowed to remove it.
+                cmd = fmt::format("fake-udev -m {} && (rm {} 2>/dev/null || true)", udev_msg, udev_ev["DEVNAME"]);
               }
               logs::log(logs::debug, "[DOCKER] Executing command: {}", cmd);
               docker_api.exec(container_id, {"/bin/bash", "-c", cmd}, "root");
@@ -264,7 +290,11 @@ void RunDocker::run(std::string_view session_id,
             if (udev_ev.count("DEVNAME") == 0) {
               cmd = fmt::format("fake-udev -m {}", udev_msg);
             } else {
-              cmd = fmt::format("mkdir -p /dev/input && mknod {} c {} {} && chmod 777 {} && fake-udev -m {}",
+              // Nodes from a live host /dev/input bind already exist.  Keep the
+              // isolated-runner behaviour while still issuing the fake-udev
+              // notification required by Steam/SDL in the bound case.
+              cmd = fmt::format("mkdir -p /dev/input && (test -e {} || mknod {} c {} {}) && (chmod 777 {} 2>/dev/null || true) && fake-udev -m {}",
+                                udev_ev["DEVNAME"],
                                 udev_ev["DEVNAME"],
                                 udev_ev["MAJOR"],
                                 udev_ev["MINOR"],
@@ -299,11 +329,13 @@ void RunDocker::run(std::string_view session_id,
     }
 
     logs::log(logs::info, "Stopped container: {}", docker_container->name);
-    try {
-      std::filesystem::remove_all(udev_base_path);
-    } catch (const std::filesystem::filesystem_error &e) {
-      logs::log(logs::warning, "Failed to remove udev base path: {}", e.what());
-    }
+    // `udev_base_path` lives below the runner's persistent state directory
+    // (for example profile-data/user/WolfSteam).  A replacement lobby can
+    // create and mount that same directory before this runner's asynchronous
+    // teardown reaches here. Removing it then races Docker's mount setup and
+    // makes the new runner fail with "source path does not exist". Individual
+    // hwdb entries are already removed by UnplugDeviceEvent; keep the base
+    // directory as persistent runner scaffolding.
   }
 }
 

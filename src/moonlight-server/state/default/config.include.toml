@@ -321,7 +321,7 @@ base_create_json = """
 
 [gstreamer.video]
 
-default_source = 'interpipesrc name=interpipesrc_{}_video listen-to={session_id}_video is-live=true stream-sync=restart-ts max-bytes=0 max-buffers=1 leaky-type=downstream'
+default_source = 'interpipesrc name=interpipesrc_{}_video listen-to={session_id}_video is-live=true format=time stream-sync=restart-ts allow-renegotiation=false accept-events=false accept-eos-event=false max-bytes=0 max-buffers=1 leaky-type=downstream'
 default_sink = """
 queue ! \
 rtpmoonlightpay_video name=moonlight_pay \
@@ -334,22 +334,20 @@ appsink sync=false max-buffers=1 drop=true name=wolf_udp_sink
 # To avoid repetition between H264, HEVC and AV1 encoders
 [gstreamer.video.defaults.nvcodec]
 video_params = """
+queue max-size-buffers=4 leaky=downstream !
 cudaupload !
-cudaconvertscale add-borders=true !
 video/x-raw(memory:CUDAMemory), width={width}, height={height}, \
 chroma-site={color_range}, format=NV12, colorimetry={color_space}, pixel-aspect-ratio=1/1\
 """
 
-# Zero-copy carries an NV12 DMABuf over the interpipe (a CUDAMemory buffer can't
-# cross the interpipe boundary -- it's bound to a CUDA context/stream the consumer
-# pipeline doesn't share). dmabuftocuda imports that DMABuf into CUDA here in the
-# consumer (via EGLImage, no system-memory copy), where the encoder's CUDA context
-# is available; cudaupload can't (it has no DMABuf sink caps).
+# The NVIDIA producer supplies already-converted NV12/P010 from the compositor's
+# Vulkan converter. Upload unchanged to CUDA for NVENC: HDR P010 pixels are native
+# PQ and must not be passed through a second RGB/PQ conversion.
 video_params_zero_copy = """
-queue !
-dmabuftocuda !
-cudaconvertscale add-borders=true !
-video/x-raw(memory:CUDAMemory),format=NV12, width={width}, height={height}, pixel-aspect-ratio=1/1
+queue max-size-buffers=4 leaky=downstream !
+cudaupload !
+video/x-raw(memory:CUDAMemory), width={width}, height={height}, \
+chroma-site={color_range}, format=NV12, colorimetry={color_space}, pixel-aspect-ratio=1/1
 """
 
 [gstreamer.video.defaults.qsv]
@@ -402,9 +400,9 @@ queue\
 
 [[gstreamer.video.hevc_encoders]]
 plugin_name = "nvcodec"
-check_elements = ["nvh265enc", "cudaconvertscale", "cudaupload"]
+check_elements = ["nvh265enc", "cudaupload", "vulkandownload"]
 encoder_pipeline = """
-nvh265enc gop-size=-1 bitrate={bitrate} vbv-buffer-size={vbv_buffer_size} aud=false rc-mode=cbr zerolatency=true preset=p1 tune=ultra-low-latency multi-pass=two-pass-quarter !
+nvh265enc gop-size=-1 bitrate={bitrate} vbv-buffer-size={vbv_buffer_size} aud=false rc-mode=cbr zerolatency=true preset=p1 tune=ultra-low-latency multi-pass=disabled !
 h265parse !
 video/x-h265, profile=main, stream-format=byte-stream\
 """

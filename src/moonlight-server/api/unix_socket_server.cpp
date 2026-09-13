@@ -248,6 +248,28 @@ UnixSocketServer::UnixSocketServer(boost::asio::io_context &io_context,
                        .handler = [this](auto req, auto socket) { endpoint_Lobbies(req, socket); },
                    });
 
+  state_->http.add(HTTPMethod::GET,
+                   "/api/v1/runtime-settings",
+                   {.summary = "Get safe runtime settings",
+                    .response_description = {{200, {.json_schema = rfl::json::to_schema<RuntimeSettingsResponse>()}}},
+                    .handler = [this](auto req, auto socket) { endpoint_RuntimeSettings(req, socket); }});
+
+  state_->http.add(
+      HTTPMethod::POST,
+      "/api/v1/runtime-settings",
+      {.summary = "Update safe runtime settings without restarting active streams",
+       .request_description = APIDescription{.json_schema = rfl::json::to_schema<UpdateRuntimeSettingsRequest>()},
+       .response_description = {{200, {.json_schema = rfl::json::to_schema<RuntimeSettingsResponse>()}},
+                                {400, {.json_schema = rfl::json::to_schema<GenericErrorResponse>()}}},
+       .handler = [this](auto req, auto socket) { endpoint_UpdateRuntimeSettings(req, socket); }});
+
+  state_->http.add(HTTPMethod::POST,
+                   "/api/v1/service/restart",
+                   {.summary = "Restart the local Wolf service",
+                    .response_description = {{202, {.json_schema = rfl::json::to_schema<GenericSuccessResponse>()}},
+                                             {503, {.json_schema = rfl::json::to_schema<GenericErrorResponse>()}}},
+                    .handler = [this](auto req, auto socket) { endpoint_RestartService(req, socket); }});
+
   state_->http.add(HTTPMethod::POST,
                    "/api/v1/lobbies/create",
                    {

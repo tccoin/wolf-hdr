@@ -88,7 +88,20 @@ std::optional<GstEncoder> get_encoder(std::string_view tech,
                                       const std::vector<GstEncoder> &encoders,
                                       const GPU_VENDOR &vendor) {
   auto default_is_available = std::bind(is_available, vendor, std::placeholders::_1);
-  auto encoder = std::find_if(encoders.begin(), encoders.end(), default_is_available);
+  // On NVIDIA, prefer NVENC over Vulkan Video.  Vulkan Video is useful on
+  // platforms without NVENC, but the NVIDIA Vulkan encoder cannot consume the
+  // interpipe handoff used by the Wolf application profiles reliably.  Picking
+  // it first also makes the result depend on TOML ordering and can silently
+  // replace the working nvh265enc path after a restart.
+  auto encoder = encoders.end();
+  if (vendor == GPU_VENDOR::NVIDIA) {
+    encoder = std::find_if(encoders.begin(), encoders.end(), [&](const auto &settings) {
+      return encoder_type(settings) == NVIDIA && default_is_available(settings);
+    });
+  }
+  if (encoder == encoders.end()) {
+    encoder = std::find_if(encoders.begin(), encoders.end(), default_is_available);
+  }
   if (encoder != std::end(encoders)) {
     auto encoder_node_name = get_render_node_name(encoder_node);
     if (encoder_type(*encoder) == VAAPI && encoder_node_name != "renderD128") {
@@ -163,7 +176,9 @@ parse_apps(const std::vector<BaseApp> &apps,
         // for NVIDIA NVENC HDR instead of collapsing it to native Vulkan caps.
         const bool uses_vulkan_download = producer_buffer_caps.find("vulkandownload") != std::string::npos;
         const bool has_explicit_p010 = producer_buffer_caps.find("P010_10LE") != std::string::npos;
-        if (support_hdr && producer_buffer_caps.find("memory:VulkanImage") != std::string::npos &&
+        if (support_hdr && std::getenv("WOLF_NATIVE_GL_HDR") != nullptr) {
+          producer_buffer_caps = "video/x-raw(memory:GLMemory), format=RGB10A2_LE";
+        } else if (support_hdr && producer_buffer_caps.find("memory:VulkanImage") != std::string::npos &&
             !uses_vulkan_download && !has_explicit_p010) {
           producer_buffer_caps = "video/x-raw(memory:VulkanImage), format=P010_10LE, colorimetry=bt2100-pq";
         } else if (support_hdr && producer_buffer_caps.find("memory:DMABuf") != std::string::npos) {
@@ -326,15 +341,22 @@ Config load_or_default(const std::string &source,
                                                  .sink = default_gst_audio_settings.default_sink};
 
   auto video_encoder = encoder_type(*h264_encoder);
+  const bool native_gl_hdr = video_encoder == NVIDIA && std::getenv("WOLF_NATIVE_GL_HDR") != nullptr;
   if (use_zero_copy) {
     switch (video_encoder) {
     case NVIDIA: {
-      // Carry an NV12 DMABuf over the interpipe and import it into CUDA in the
-      // consumer (dmabuftocuda, see nvcodec video_params_zero_copy). A CUDAMemory
-      // buffer can't cross the interpipe -- it's tied to a CUDA context/stream the
-      // per-client encoder pipeline doesn't share -- so the producer must hand off
-      // the context-free dmabuf, exactly like the VAAPI path below.
-      default_base_video.producer_buffer_caps = "video/x-raw(memory:DMABuf), drm-format=NV12";
+      if (native_gl_hdr) {
+        default_base_video.producer_buffer_caps = "video/x-raw(memory:GLMemory), format=RGB10A2_LE";
+        break;
+      }
+      // Render into the compositor's P010 Vulkan target first. That target maps
+      // SDR UI to PQ and, crucially, preserves native PQ game frames without a
+      // second transfer conversion. Download the already-PQ P010 frame and
+      // upload it to CUDA solely for NVENC; cudaconvertscale must not reinterpret
+      // the game's RGB pixels on this path.
+      default_base_video.producer_buffer_caps =
+          "video/x-raw(memory:VulkanImage), format=P010_10LE, colorimetry=bt2100-pq ! "
+          "vulkandownload ! video/x-raw, format=P010_10LE, colorimetry=bt2100-pq";
       break;
     }
     case VAAPI:
@@ -484,7 +506,9 @@ Config load_or_default(const std::string &source,
                 .support_av1 = hardware_av1,
                 .support_hdr = hevc_encoder.has_value() || hardware_av1,
                 .paired_clients = clients_atom,
-                .profiles = profiles_atom};
+                .profiles = profiles_atom,
+                .runtime_settings = std::make_shared<immer::atom<RuntimeSettings>>(
+                    RuntimeSettings{.single_player_disconnect_grace_seconds = cfg.runtime.single_player_disconnect_grace_seconds})};
 }
 
 void pair(const Config &cfg, const PairedClient &client) {
@@ -547,6 +571,14 @@ void update_client_settings(const Config &cfg, std::size_t client_id, const Pair
                        ranges::to<std::vector<PairedClient>>();
 
   // Save back to file
+  rfl::toml::save(cfg.config_source, tml);
+}
+
+void update_runtime_settings(const Config &cfg, const RuntimeSettings &settings) {
+  cfg.runtime_settings->store(settings);
+
+  auto tml = rfl::toml::load<WolfConfig, rfl::DefaultIfMissing>(cfg.config_source).value();
+  tml.runtime.single_player_disconnect_grace_seconds = settings.single_player_disconnect_grace_seconds;
   rfl::toml::save(cfg.config_source, tml);
 }
 

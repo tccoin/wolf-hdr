@@ -102,12 +102,14 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
           // Start Gstreamer producer pipeline
           std::thread([session, on_ready, gst_context = app_state->gst_context]() {
             streaming::start_video_producer(std::to_string(session->session_id),
-                                            session->app->video_producer_buffer_caps,
+                                            streaming::producer_caps_for_output(
+                                                session->app->video_producer_buffer_caps,
+                                                session->hdr_output_requested),
                                             session->app->render_node,
                                             {.width = session->display_mode.width,
                                              .height = session->display_mode.height,
                                              .refreshRate = session->display_mode.refreshRate},
-                                            session->app->base.support_hdr,
+                                            session->hdr_output_requested,
                                             gst_context,
                                             on_ready,
                                             session->event_bus);
@@ -223,7 +225,9 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
                           .refresh_rate = run_session->stream_session->display_mode.refreshRate,
                           .wayland_render_node = run_session->stream_session->app->render_node,
                           .runner_render_node = run_session->stream_session->app->render_node,
-                          .video_producer_buffer_caps = run_session->stream_session->app->video_producer_buffer_caps,
+                          .video_producer_buffer_caps = streaming::producer_caps_for_output(
+                              run_session->stream_session->app->video_producer_buffer_caps,
+                              run_session->stream_session->hdr_output_requested),
                       },
                   .wayland_display = run_session->stream_session->wayland_display->load(),
                   .audio_server = audio_server,
@@ -237,9 +241,16 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
           // Runner process ended
           if (run_session->stop_stream_when_over) {
             run_session->stream_session->wayland_display->store(nullptr);
-
-            app_state->event_bus->fire_event(immer::box<events::StopStreamEvent>(
-                events::StopStreamEvent{.session_id = run_session->stream_session->session_id}));
+            const auto current = state::get_session_by_id(app_state->running_sessions->load().get(),
+                                                          run_session->stream_session->session_id);
+            if (current && current->wayland_display == run_session->stream_session->wayland_display) {
+              app_state->event_bus->fire_event(immer::box<events::StopStreamEvent>(
+                  events::StopStreamEvent{.session_id = run_session->stream_session->session_id}));
+            } else {
+              logs::log(logs::debug,
+                        "[STREAM_SESSION] Ignoring stop from superseded runner generation for session {}",
+                        run_session->stream_session->session_id);
+            }
           }
         }).detach();
       }));

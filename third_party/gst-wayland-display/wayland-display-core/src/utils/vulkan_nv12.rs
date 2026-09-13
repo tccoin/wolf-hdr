@@ -384,6 +384,14 @@ fn rgba_vk_format(fourcc: DrmFourcc) -> Option<vk::Format> {
     Some(match fourcc {
         DrmFourcc::Abgr8888 | DrmFourcc::Xbgr8888 => vk::Format::R8G8B8A8_UNORM,
         DrmFourcc::Argb8888 | DrmFourcc::Xrgb8888 => vk::Format::B8G8R8A8_UNORM,
+        // AB30/XB30 are the 10-bit HDR render target used under WOLF_HDR_CM. Their component
+        // order matches AB24/XB24 above, with R in the low 10 bits of the packed pixel.
+        DrmFourcc::Abgr2101010 | DrmFourcc::Xbgr2101010 => {
+            vk::Format::A2B10G10R10_UNORM_PACK32
+        }
+        DrmFourcc::Argb2101010 | DrmFourcc::Xrgb2101010 => {
+            vk::Format::A2R10G10B10_UNORM_PACK32
+        }
         // HDR render-path spike (WOLF_HDR_SPIKE): the compositor renders into an fp16 RGBA
         // dmabuf so highlights can exceed 1.0. The sampler then reads linear fp16 (no clamp),
         // which the rgba_to_p010_hdr shader expects (1.0 == SDR reference white).
@@ -1556,7 +1564,7 @@ fn sdr_reference_white() -> f32 {
         .unwrap_or(203.0)
 }
 
-/// `WOLF_HDR_CM`: dynamic-colorimetry HDR mode. When set, the fp16 P010 converter builds BOTH
+/// `WOLF_HDR_CM`: dynamic-colorimetry HDR mode. When set, the P010 converter builds BOTH
 /// the SDR (`RGBA_TO_P010_SPV`, BT.709 matrix, no PQ) and PQ-passthrough
 /// (`RGBA_PQPASS_TO_P010_SPV`) pipelines up front -- independent of the negotiated caps
 /// colorimetry -- and `convert()` picks per frame by `pq_passthrough`, so a producer's
@@ -1567,14 +1575,14 @@ fn wolf_hdr_cm() -> bool {
     *E.get_or_init(|| std::env::var("WOLF_HDR_CM").is_ok())
 }
 
-/// The "normal" (`pq_passthrough = false`) converter shader. Under `WOLF_HDR_CM` on the fp16
-/// P010 path this is the BT.2020/PQ shader: SDR sRGB frames must be tone-mapped into the stable
+/// The "normal" (`pq_passthrough = false`) converter shader. Under `WOLF_HDR_CM` on the P010
+/// path this is the BT.2020/PQ shader: SDR sRGB frames must be tone-mapped into the stable
 /// HDR10/PQ transport, otherwise the receiver interprets ordinary SDR code values as PQ and the
 /// desktop/Steam UI becomes over-bright and over-saturated. Already-PQ HDR content uses the
 /// separate per-frame passthrough pipeline. With `WOLF_HDR_CM` unset this is exactly
 /// `PixFmt::shader` (caps-driven).
 fn normal_shader(fmt: PixFmt, bt2020: bool, fp16_input: bool) -> &'static [u8] {
-    if wolf_hdr_cm() && fmt == PixFmt::P010 && fp16_input {
+    if wolf_hdr_cm() && fmt == PixFmt::P010 {
         RGBA_TO_P010_BT2020_SPV
     } else {
         fmt.shader(bt2020, fp16_input)
@@ -1625,9 +1633,9 @@ unsafe fn build_compute_pipeline(
 }
 
 /// Build the per-frame PQ-passthrough pipeline, or `None` when it isn't applicable. Needed on the
-/// HDR fp16 P010 path, where a frame from a 10-bit already-PQ client buffer must skip the
+/// HDR P010 path, where a frame from a 10-bit already-PQ client buffer must skip the
 /// tone-map. The static HDR path builds it when the caps are `bt2020`; under `WOLF_HDR_CM` it's
-/// built for ANY fp16 P010 negotiation (independent of the caps `bt2020` flag) so it survives a
+/// built for ANY P010 negotiation (independent of the caps `bt2020` flag) so it survives a
 /// bt709-tagged negotiation / a mid-stream colorimetry flip. Best-effort: a build failure (e.g.
 /// the placeholder `.spv` hasn't been compiled with glslc yet) leaves it `None` so the normal
 /// pipeline still runs -- byte-identical to the prior behavior.
@@ -1636,10 +1644,10 @@ unsafe fn build_pq_passthrough(
     layout: vk::PipelineLayout,
     fmt: PixFmt,
     bt2020: bool,
-    fp16_input: bool,
+    _fp16_input: bool,
     sdr_ref_white: f32,
 ) -> Option<vk::Pipeline> {
-    let want = fmt == PixFmt::P010 && fp16_input && (bt2020 || wolf_hdr_cm());
+    let want = fmt == PixFmt::P010 && (bt2020 || wolf_hdr_cm());
     if !want {
         return None;
     }

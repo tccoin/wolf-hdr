@@ -7,6 +7,7 @@
 #include <core/audio.hpp>
 #include <core/input.hpp>
 #include <core/virtual-display.hpp>
+#include <atomic>
 #include <cstddef>
 #include <eventbus/event_bus.hpp>
 #include <helpers/tsqueue.hpp>
@@ -119,6 +120,13 @@ struct Lobby {
    */
   std::shared_ptr<immer::atom<immer::vector<immer::box<std::string /* session_id */>>>> connected_sessions =
       std::make_shared<immer::atom<immer::vector<immer::box<std::string>>>>();
+
+  /**
+   * Increments whenever the lobby is joined or becomes empty. A delayed
+   * single-player cleanup captures this value, so an old timeout can never
+   * stop a lobby that has since been resumed.
+   */
+  std::shared_ptr<std::atomic_uint64_t> empty_session_generation = std::make_shared<std::atomic_uint64_t>(0);
 
   /**
    * The wayland display that is currently being used by the lobby
@@ -423,6 +431,9 @@ using EventsVariant = std::variant<immer::box<PlugDeviceEvent>,
 struct StreamSession {
   moonlight::DisplayMode display_mode;
   int audio_channel_count;
+  // Moonlight sends hdrMode in /launch before RTSP ANNOUNCE. Keep it on the
+  // session so the compositor can choose NV12/SDR or P010/HDR before the app starts.
+  bool hdr_output_requested = false;
 
   std::shared_ptr<EventBusType> event_bus;
   immer::box<wolf::config::ClientSettings> client_settings;

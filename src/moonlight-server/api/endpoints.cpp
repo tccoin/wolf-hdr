@@ -6,7 +6,72 @@
 #include <state/sessions.hpp>
 #include <state/utils.hpp>
 
+#include <chrono>
+#include <thread>
+
 namespace wolf::api {
+
+void UnixSocketServer::endpoint_RuntimeSettings(const wolf::api::HTTPRequest &req, std::shared_ptr<UnixSocket> socket) {
+  const auto settings = state_->app_state->config->runtime_settings->load();
+  send_http(socket,
+            200,
+            rfl::json::write(RuntimeSettingsResponse{
+                .single_player_disconnect_grace_seconds = settings->single_player_disconnect_grace_seconds}));
+}
+
+void UnixSocketServer::endpoint_UpdateRuntimeSettings(const wolf::api::HTTPRequest &req,
+                                                      std::shared_ptr<UnixSocket> socket) {
+  auto update = rfl::json::read<UpdateRuntimeSettingsRequest>(req.body);
+  if (!update) {
+    send_http(socket, 400, rfl::json::write(GenericErrorResponse{.error = update.error().what()}));
+    return;
+  }
+
+  constexpr int MAX_DISCONNECT_GRACE_SECONDS = 60 * 60;
+  auto current = state_->app_state->config->runtime_settings->load();
+  auto next = *current;
+  if (update->single_player_disconnect_grace_seconds) {
+    const int seconds = *update->single_player_disconnect_grace_seconds;
+    if (seconds < 0 || seconds > MAX_DISCONNECT_GRACE_SECONDS) {
+      send_http(socket,
+                400,
+                rfl::json::write(GenericErrorResponse{.error = "single_player_disconnect_grace_seconds must be 0..3600"}));
+      return;
+    }
+    next.single_player_disconnect_grace_seconds = seconds;
+  }
+
+  state::update_runtime_settings(state_->app_state->config.get(), next);
+  logs::log(logs::info,
+            "[SETTINGS] Single-player disconnect grace period set to {} seconds",
+            next.single_player_disconnect_grace_seconds);
+  send_http(socket,
+            200,
+            rfl::json::write(RuntimeSettingsResponse{
+                .single_player_disconnect_grace_seconds = next.single_player_disconnect_grace_seconds}));
+}
+
+void UnixSocketServer::endpoint_RestartService(const wolf::api::HTTPRequest &req, std::shared_ptr<UnixSocket> socket) {
+  const auto self_container = utils::get_env("WOLF_SELF_CONTAINER_NAME");
+  if (!self_container || self_container[0] == '\0') {
+    send_http(socket,
+              503,
+              rfl::json::write(GenericErrorResponse{.error = "Wolf service restart is not configured"}));
+    return;
+  }
+
+  send_http(socket, 202, rfl::json::write(GenericSuccessResponse{}));
+  const std::string docker_socket = utils::get_env("WOLF_DOCKER_SOCKET", "/var/run/docker.sock");
+  const std::string container_name = self_container;
+  std::thread([docker_socket, container_name]() {
+    // Let the response leave the Unix socket before Docker stops this process.
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    core::docker::DockerAPI docker_api(docker_socket);
+    if (!docker_api.restart_by_id(container_name)) {
+      logs::log(logs::error, "[SETTINGS] Failed to restart Wolf container {}", container_name);
+    }
+  }).detach();
+}
 
 void UnixSocketServer::endpoint_Events(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket) {
   // curl -N --unix-socket /tmp/wolf.sock http://localhost/api/v1/events
@@ -417,7 +482,11 @@ void UnixSocketServer::endpoint_LobbyCreate(const wolf::api::HTTPRequest &req, s
         .icon_png_path = event.value().icon_png_path,
         .pin = event.value().pin.get(),
         .multi_user = event.value().multi_user,
-        .stop_when_everyone_leaves = event.value().stop_when_everyone_leaves,
+        // A single-player lobby is a resumable application session.  Wolf UI
+        // may send the API default (`true`) here, but stopping it on a brief
+        // Moonlight disconnect destroys the game before the client can resume
+        // or switch devices.  Co-op lobbies retain their explicit lifecycle.
+        .stop_when_everyone_leaves = event.value().multi_user ? event.value().stop_when_everyone_leaves : false,
         .video_settings = event.value().video_settings,
         .audio_settings = event.value().audio_settings,
         .client_settings =

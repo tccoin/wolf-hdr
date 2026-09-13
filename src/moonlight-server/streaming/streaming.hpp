@@ -54,6 +54,7 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
 
 std::string initial_video_colorimetry(bool hdr_requested, events::ColorSpace requested_color_space);
 std::string prepare_video_pipeline(std::string pipeline, bool hdr_requested);
+std::string producer_caps_for_output(std::string caps, bool hdr_output_requested);
 
 void start_streaming_audio(immer::box<events::AudioSession> audio_session,
                            const std::shared_ptr<events::EventBusType> &event_bus,

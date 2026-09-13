@@ -247,10 +247,21 @@ impl State {
             }
         }
 
-        // WOLF_HDR_CM: per-frame PQ-passthrough flag (true when the active surface's last
-        // committed buffer was a 10-bit, already-PQ BT.2020 client buffer). Always false unless
-        // WOLF_HDR_CM is set, so the converter behaves identically to before by default.
-        let pq_passthrough = self.current_input_is_pq;
+        // Only a 10-bit compositor target can carry an already-PQ client surface without
+        // quantising it. The default HDR-transport path intentionally uses AB24 because AB30
+        // loses the NVIDIA Vulkan device at 3440x1440; in that mode every frame, including a PQ
+        // client surface, must go through the normal SDR-to-PQ shader instead of being marked as
+        // a lossless passthrough.
+        let pq_passthrough = self.current_input_is_pq
+            && matches!(
+                render_rgba_fourcc,
+                Some(
+                    Fourcc::Abgr2101010
+                        | Fourcc::Xbgr2101010
+                        | Fourcc::Argb2101010
+                        | Fourcc::Xrgb2101010
+                )
+            );
         match self.output_buffer.clone().unwrap().to_gs_buffer(
             &mut target,
             &mut self.renderer,

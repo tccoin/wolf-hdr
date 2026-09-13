@@ -2,10 +2,29 @@
 *
 
 !src
+!tests
+!tests/**
 !Cargo.toml
 !cmake
 !CMakeLists.txt
 !.clang-format
 !docker/gstreamer.control
+!docker/nvcodec-rgb10-hdr-vui.patch
 !docker/startup.sh
 !docker/supervisord.conf
+!docker/steam-wait-input.sh
+!docker/steam-runtime-dirs-init.sh
+!docker/steam-safe-user-init.sh
+!docker/steam-uinput-init.sh
+!docker/steam-wait-wayland.sh
+!docker/cyberpunk-hdr-startup.sh
+!docker/steam-hdr-startup.sh
+!docker/steam-adaptive-startup.sh
+!docker/steam-hdr-game-env.sh
+
+# The HDR refresh image is built from the vendored compositor plugin. Keep it
+# in the Docker context so local HDR/zero-copy changes cannot be silently
+# replaced by the stale source already present in the base image.
+!third_party
+!third_party/gst-wayland-display
+!third_party/gst-wayland-display/**

@@ -1,6 +1,8 @@
 use gst::glib;
 use gst::prelude::*;
 
+#[cfg(feature = "gl-hdr")]
+mod hdr_gl;
 mod imp;
 
 glib::wrapper! {

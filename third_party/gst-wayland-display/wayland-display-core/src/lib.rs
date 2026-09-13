@@ -30,7 +30,11 @@ pub enum Command {
     InputDevice(String),
     VideoInfo(GstVideoInfo),
     Buffer(
-        SyncSender<Result<gst::Buffer, SwapBuffersError>>,
+        // The compositor decides whether the frame is a native PQ surface while
+        // it is rendering it.  Keep that decision with the buffer so the GL HDR
+        // bridge can transform only 8-bit SDR frames and leave native PQ frames
+        // untouched.
+        SyncSender<Result<(gst::Buffer, bool), SwapBuffersError>>,
         Option<Tracer>,
     ),
     #[cfg(feature = "cuda")]
@@ -297,6 +301,13 @@ impl WaylandDisplay {
     }
 
     pub fn frame(&self) -> Result<gst::Buffer, gst::FlowError> {
+        self.frame_with_input_hdr().map(|(buffer, _)| buffer)
+    }
+
+    /// Return a compositor frame together with whether its active input was
+    /// already a native BT.2100/PQ surface.  Consumers that write a PQ output
+    /// can use this to avoid treating an SDR Steam desktop as native HDR.
+    pub fn frame_with_input_hdr(&self) -> Result<(gst::Buffer, bool), gst::FlowError> {
         let (buffer_tx, buffer_rx) = mpsc::sync_channel(0);
         if let Err(err) = self
             .command_tx
@@ -307,7 +318,7 @@ impl WaylandDisplay {
         }
 
         match buffer_rx.recv() {
-            Ok(Ok(buffer)) => Ok(buffer),
+            Ok(Ok(frame)) => Ok(frame),
             Ok(Err(err)) => match err {
                 SwapBuffersError::AlreadySwapped => unreachable!(),
                 SwapBuffersError::ContextLost(_) => Err(gst::FlowError::Eos),

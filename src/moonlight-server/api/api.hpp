@@ -35,6 +35,15 @@ struct GenericErrorResponse {
   std::string error;
 };
 
+struct RuntimeSettingsResponse {
+  bool success = true;
+  int single_player_disconnect_grace_seconds = 10 * 60;
+};
+
+struct UpdateRuntimeSettingsRequest {
+  std::optional<int> single_player_disconnect_grace_seconds;
+};
+
 struct PendingPairRequestsResponse {
   bool success = true;
   std::vector<PendingPairClient> requests;
@@ -192,6 +201,10 @@ public:
 
 private:
   void endpoint_Events(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
+
+  void endpoint_RuntimeSettings(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
+  void endpoint_UpdateRuntimeSettings(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
+  void endpoint_RestartService(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
 
   void endpoint_PendingPairRequest(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
   void endpoint_Pair(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);

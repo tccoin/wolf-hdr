@@ -58,38 +58,23 @@ pub struct RawVk {
 
 /// Per-`waylanddisplaysrc`-element owner of the Vulkan objects the encode path shares.
 ///
-/// Historically the
-/// owned `GstVulkanInstance` + `GstVulkanDevice` lived in *process-global* `OnceLock` slots,
-/// so every session in one process reused the first session's `VkDevice` (a single failure
-/// domain — one session's `DEVICE_LOST` corrupts all N; session 2..N's `target_minor`
-/// ignored; a deliberate per-process device leak). One `VulkanShare` is now created per
-/// element and cloned **once** into that element's compositor thread (mirroring the existing
-/// `app_surface_commits` / `renderer_degraded` `Arc`s threaded through
-/// `WaylandDisplay::new_with_channel` -> `comp::init`), so each `waylanddisplaysrc` mints,
-/// answers `gst.vulkan.{instance,device}` context queries with, and owns its **own** device,
-/// released when the element is finalized and this `Arc` drops. N concurrent Vulkan-encode
-/// sessions on one host therefore get N isolated devices — a `DEVICE_LOST` on one retires
-/// only that element's device, leaving the other N-1 untouched.
-///
-/// This is a **storage-location** change only: device creation
-/// ([`ensure_owned_device`](VulkanShare::ensure_owned_device)) is byte-identical to the
-/// previous global path, with no vendor branch, so the RADV path sees no behavioral change.
-/// The `wayland_display_vk_*` C bridge is untouched.
+/// The share is created per element and cloned once into that element's compositor thread, so
+/// each `waylanddisplaysrc` owns its own device and a failed session does not poison another
+/// session's device.
 pub struct VulkanShare {
     /// The `GstVulkanInstance` we own (keeps it alive + lets us answer `gst.vulkan.instance`
-    /// context queries). Replaces the process-global `instance_slot()`.
+    /// context queries). It is kept for the lifetime of the element.
     instance: Mutex<Option<VulkanInstance>>,
     /// The shared device, filled from `set_context`
     /// ([`handle_set_context`](VulkanShare::handle_set_context)) or minted by
     /// [`ensure_owned_device`](VulkanShare::ensure_owned_device), and read by the converter
-    /// when it builds its output ring. Replaces the process-global `device_slot()`.
+    /// when it builds its output ring. It is kept for the lifetime of the element.
     device: Mutex<Option<VulkanDevice>>,
 }
 
 impl VulkanShare {
-    /// A fresh, empty per-element share. Cheap; holds no Vulkan objects until first use. Kept
-    /// behind an `Arc` so one clone can be handed to the compositor thread while the element
-    /// keeps the other (exactly like `app_surface_commits` / `renderer_degraded`).
+    /// A fresh, empty per-element share. It holds no Vulkan objects until first use and is kept
+    /// behind an `Arc` so the compositor thread can hold a reference independently.
     pub fn new() -> Arc<VulkanShare> {
         Arc::new(VulkanShare {
             instance: Mutex::new(None),
@@ -215,13 +200,13 @@ unsafe fn physical_index_for_minor(
 }
 
 impl VulkanShare {
-    /// Create (once, on **this element**) the `GstVulkanInstance` + `GstVulkanDevice` that *we*
+    /// Create (once, on this element) the `GstVulkanInstance` + `GstVulkanDevice` that *we*
     /// own, on the GPU backing `target_minor`, with the external-memory extensions the
     /// RGBA-dmabuf import needs (`VK_KHR_external_memory_fd` etc.) enabled — which gst-vulkan's
     /// own device does not. This is the device we hand the encoder (see
     /// [`provide_context`](VulkanShare::provide_context)) so producer and encoder share one
-    /// device with no zero-copy gap *and* no gstreamer fork. Idempotent **per element** (not
-    /// per process): the first call on *this* share mints on *this* element's `target_minor`.
+    /// device with no zero-copy gap *and* no gstreamer fork. Idempotent per element: the first
+    /// call on this share mints the device on this element's target node.
     ///
     /// Device creation below is unchanged from the pre-patch process-global path — no vendor
     /// branch — so RADV behaves byte-identically; only where the result is stored moved from a
