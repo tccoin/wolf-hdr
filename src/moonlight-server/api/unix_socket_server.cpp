@@ -119,6 +119,18 @@ UnixSocketServer::UnixSocketServer(boost::asio::io_context &io_context,
                                              {500, {.json_schema = rfl::json::to_schema<GenericErrorResponse>()}}},
                     .handler = [this](auto req, auto socket) { endpoint_RemoveApp(req, socket); }});
 
+  state_->http.add(
+      HTTPMethod::POST,
+      "/api/v1/apps/settings",
+      {.summary = "Save per-app tile settings",
+       .description = "Persist safe launch-time settings for one application tile.",
+       .request_description = APIDescription{.json_schema = rfl::json::to_schema<UpdateAppSettingsRequest>()},
+       .response_description = {{200, {.json_schema = rfl::json::to_schema<GenericSuccessResponse>()}},
+                                {400, {.json_schema = rfl::json::to_schema<GenericErrorResponse>()}},
+                                {404, {.json_schema = rfl::json::to_schema<GenericErrorResponse>()}},
+                                {500, {.json_schema = rfl::json::to_schema<GenericErrorResponse>()}}},
+       .handler = [this](auto req, auto socket) { endpoint_UpdateAppSettings(req, socket); }});
+
   /**
    * Profiles API
    */

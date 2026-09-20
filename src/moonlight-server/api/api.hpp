@@ -87,6 +87,15 @@ struct AppDeleteRequest {
   std::string id;
 };
 
+struct UpdateAppSettingsRequest {
+  rfl::Description<"The profile that owns the tile", std::string> profile_id;
+  rfl::Description<"The tile ID to update", std::string> id;
+  std::optional<bool> support_hdr;
+  std::optional<bool> start_virtual_compositor;
+  std::optional<bool> start_audio_server;
+  std::optional<bool> controller_create_screenshot;
+};
+
 struct ProfileListResponse {
   bool success = true;
   std::vector<rfl::Reflector<events::Profile>::ReflType> profiles;
@@ -214,6 +223,7 @@ private:
   void endpoint_Apps(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
   void endpoint_AddApp(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
   void endpoint_RemoveApp(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
+  void endpoint_UpdateAppSettings(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
 
   void endpoint_Profiles(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);
   void endpoint_AddProfile(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket);

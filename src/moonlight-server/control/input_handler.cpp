@@ -632,8 +632,9 @@ void controller_multi(const CONTROLLER_MULTI_PACKET &pkt,
     selected_pad = create_new_joypad(session, connected_client, pkt.controller_number, XBOX, ANALOG_TRIGGERS | RUMBLE);
   }
   if (selected_pad) {
+    const bool is_ps5 = std::holds_alternative<PS5Joypad>(*selected_pad);
     std::visit(
-        [pkt, session](inputtino::Joypad &pad) {
+        [pkt, session, is_ps5](inputtino::Joypad &pad) {
           std::uint16_t bf = pkt.button_flags;
           std::uint32_t bf2 = pkt.buttonFlags2;
           auto pressed_buttons = bf | (bf2 << 16);
@@ -642,6 +643,18 @@ void controller_multi(const CONTROLLER_MULTI_PACKET &pkt,
               pressed_buttons & inputtino::Joypad::RIGHT_BUTTON) {
             session.event_bus->fire_event(immer::box<events::ClientWolfUIComboEvent>{
                 events::ClientWolfUIComboEvent{.session_id = session.session_id}});
+          }
+          // Keep the native DualSense Create button forwarded to the game. On
+          // opt-in tiles, its press edge also sends Steam's normal F12 shortcut.
+          const bool create_pressed = is_ps5 && (pressed_buttons & inputtino::Joypad::BACK);
+          bool send_screenshot = false;
+          session.controller_create_pressed->update([&](bool was_pressed) {
+            send_screenshot = session.app->controller_create_screenshot && create_pressed && !was_pressed;
+            return create_pressed;
+          });
+          if (send_screenshot && session.keyboard->has_value()) {
+            std::visit([](auto &keyboard) { keyboard.press(0x7B); }, session.keyboard->value());
+            std::visit([](auto &keyboard) { keyboard.release(0x7B); }, session.keyboard->value());
           }
           pad.set_pressed_buttons(pressed_buttons);
           pad.set_stick(inputtino::Joypad::LS, pkt.left_stick_x, pkt.left_stick_y);

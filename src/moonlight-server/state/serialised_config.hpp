@@ -141,6 +141,8 @@ struct BaseApp {
   std::optional<BaseAppAudioOverride> audio;
   std::optional<bool> start_virtual_compositor;
   std::optional<bool> start_audio_server;
+  /// When enabled, a native DualSense Create press also sends F12 to the app.
+  std::optional<bool> controller_create_screenshot;
   rfl::TaggedUnion<"type", AppCMD, AppDocker> runner =
       AppCMD{}; // We have to provide a default or rfl::DefaultIfMissing will fail
 };

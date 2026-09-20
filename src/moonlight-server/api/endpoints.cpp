@@ -33,10 +33,10 @@ void UnixSocketServer::endpoint_UpdateRuntimeSettings(const wolf::api::HTTPReque
   if (update->single_player_disconnect_grace_seconds) {
     const int seconds = *update->single_player_disconnect_grace_seconds;
     if (seconds < 0 || seconds > MAX_DISCONNECT_GRACE_SECONDS) {
-      send_http(socket,
-                400,
-                rfl::json::write(
-                    GenericErrorResponse{.error = "single_player_disconnect_grace_seconds must be 0..43200"}));
+      send_http(
+          socket,
+          400,
+          rfl::json::write(GenericErrorResponse{.error = "single_player_disconnect_grace_seconds must be 0..43200"}));
       return;
     }
     next.single_player_disconnect_grace_seconds = seconds;
@@ -55,9 +55,7 @@ void UnixSocketServer::endpoint_UpdateRuntimeSettings(const wolf::api::HTTPReque
 void UnixSocketServer::endpoint_RestartService(const wolf::api::HTTPRequest &req, std::shared_ptr<UnixSocket> socket) {
   const auto self_container = utils::get_env("WOLF_SELF_CONTAINER_NAME");
   if (!self_container || self_container[0] == '\0') {
-    send_http(socket,
-              503,
-              rfl::json::write(GenericErrorResponse{.error = "Wolf service restart is not configured"}));
+    send_http(socket, 503, rfl::json::write(GenericErrorResponse{.error = "Wolf service restart is not configured"}));
     return;
   }
 
@@ -214,6 +212,77 @@ void UnixSocketServer::endpoint_RemoveApp(const HTTPRequest &req, std::shared_pt
     logs::log(logs::warning, "[API] Invalid event: {} - {}", req.body, app.error().what());
     auto res = GenericErrorResponse{.error = app.error().what()};
     send_http(socket, 500, rfl::json::write(res));
+  }
+}
+
+void UnixSocketServer::endpoint_UpdateAppSettings(const HTTPRequest &req, std::shared_ptr<UnixSocket> socket) {
+  auto settings = rfl::json::read<UpdateAppSettingsRequest>(req.body);
+  if (!settings) {
+    logs::log(logs::warning, "[API] Invalid app settings request: {} - {}", req.body, settings.error().what());
+    send_http(socket, 400, rfl::json::write(GenericErrorResponse{.error = settings.error().what()}));
+    return;
+  }
+
+  try {
+    const auto &value = settings.value();
+    // Persist first. This updates only the requested BaseApp fields and leaves
+    // custom video/audio pipelines untouched.
+    if (!state::update_app_settings(state_->app_state->config.get(),
+                                    value.profile_id.value(),
+                                    value.id.value(),
+                                    value.support_hdr,
+                                    value.start_virtual_compositor,
+                                    value.start_audio_server,
+                                    value.controller_create_screenshot)) {
+      send_http(socket, 404, rfl::json::write(GenericErrorResponse{.error = "App tile not found"}));
+      return;
+    }
+
+    bool updated = false;
+    const auto profiles = state_->app_state->config->profiles->load().get();
+    for (const auto &profile : profiles) {
+      if (profile->id != value.profile_id.value()) {
+        continue;
+      }
+      profile->apps->update([&](const auto &apps) {
+        return apps | ranges::views::transform([&](const immer::box<events::App> &app) {
+                 if (app->base.id != value.id.value()) {
+                   return app;
+                 }
+                 const auto current = rfl::Reflector<events::App>::from(*app);
+                 const auto next = rfl::Reflector<events::App>::ReflType{
+                     .title = current.title,
+                     .id = current.id,
+                     .support_hdr = value.support_hdr.value_or(current.support_hdr),
+                     .icon_png_path = current.icon_png_path,
+                     .h264_gst_pipeline = current.h264_gst_pipeline,
+                     .hevc_gst_pipeline = current.hevc_gst_pipeline,
+                     .av1_gst_pipeline = current.av1_gst_pipeline,
+                     .video_producer_buffer_caps = current.video_producer_buffer_caps,
+                     .render_node = current.render_node,
+                     .opus_gst_pipeline = current.opus_gst_pipeline,
+                     .start_virtual_compositor =
+                         value.start_virtual_compositor.value_or(current.start_virtual_compositor),
+                     .start_audio_server = value.start_audio_server.value_or(current.start_audio_server),
+                     .controller_create_screenshot =
+                         value.controller_create_screenshot.value_or(current.controller_create_screenshot),
+                     .runner = current.runner};
+                 updated = true;
+                 return immer::box<events::App>(
+                     rfl::Reflector<events::App>::to(next, this->state_->app_state->event_bus));
+               }) |
+               ranges::to<immer::vector<immer::box<events::App>>>();
+      });
+      break;
+    }
+    if (!updated) {
+      send_http(socket, 500, rfl::json::write(GenericErrorResponse{.error = "App settings saved but not applied"}));
+      return;
+    }
+    send_http(socket, 200, rfl::json::write(GenericSuccessResponse{}));
+  } catch (const std::exception &e) {
+    logs::log(logs::warning, "[API] Failed to save app settings: {}", e.what());
+    send_http(socket, 500, rfl::json::write(GenericErrorResponse{.error = e.what()}));
   }
 }
 

@@ -202,4 +202,13 @@ void update_runtime_settings(const Config &cfg, const RuntimeSettings &settings)
  * Side effects: will save back the configuration to disk
  */
 void update_profiles(const Config &cfg, const ProfilesList &profiles);
+
+/** Persist only safe per-tile launch settings without replacing its video/audio overrides. */
+bool update_app_settings(const Config &cfg,
+                         std::string_view profile_id,
+                         std::string_view app_id,
+                         std::optional<bool> support_hdr,
+                         std::optional<bool> start_virtual_compositor,
+                         std::optional<bool> start_audio_server,
+                         std::optional<bool> controller_create_screenshot);
 } // namespace state

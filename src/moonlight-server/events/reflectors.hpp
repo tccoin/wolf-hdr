@@ -58,6 +58,7 @@ template <> struct Reflector<events::App> {
     std::string opus_gst_pipeline;
     bool start_virtual_compositor;
     bool start_audio_server;
+    bool controller_create_screenshot;
     Reflector<events::Runner>::ReflType runner;
   };
 
@@ -74,6 +75,7 @@ template <> struct Reflector<events::App> {
             .opus_gst_pipeline = v.opus_gst_pipeline,
             .start_virtual_compositor = v.start_virtual_compositor,
             .start_audio_server = v.start_audio_server,
+            .controller_create_screenshot = v.controller_create_screenshot,
             .runner = v.runner->serialize()};
   }
 
@@ -89,6 +91,7 @@ template <> struct Reflector<events::App> {
         .opus_gst_pipeline = app.opus_gst_pipeline,
         .start_virtual_compositor = app.start_virtual_compositor,
         .start_audio_server = app.start_audio_server,
+        .controller_create_screenshot = app.controller_create_screenshot,
         .runner = runner,
     };
   }

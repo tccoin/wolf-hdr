@@ -2,12 +2,12 @@
 
 #define BOOST_THREAD_PROVIDES_FUTURE_CONTINUATION
 #define BOOST_THREAD_PROVIDES_FUTURE
+#include <atomic>
 #include <boost/thread.hpp>
 #include <boost/thread/future.hpp>
 #include <core/audio.hpp>
 #include <core/input.hpp>
 #include <core/virtual-display.hpp>
-#include <atomic>
 #include <cstddef>
 #include <eventbus/event_bus.hpp>
 #include <helpers/tsqueue.hpp>
@@ -75,6 +75,7 @@ struct App {
   std::string opus_gst_pipeline;
   bool start_virtual_compositor;
   bool start_audio_server;
+  bool controller_create_screenshot;
   std::shared_ptr<Runner> runner;
 };
 
@@ -481,6 +482,9 @@ struct StreamSession {
       std::make_shared<std::optional<TouchScreenTypes>>(); /* Now added at the start */
 
   std::shared_ptr<immer::atom<JoypadList>> joypads = std::make_shared<immer::atom<JoypadList>>();
+
+  /// Edge detector for the per-app DualSense Create -> F12 shortcut.
+  std::shared_ptr<immer::atom<bool>> controller_create_pressed = std::make_shared<immer::atom<bool>>(false);
 
   std::shared_ptr<std::optional<input::PenTablet>> pen_tablet =
       std::make_shared<std::optional<input::PenTablet>>(); /* Optional, will be set on first use */

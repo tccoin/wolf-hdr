@@ -179,7 +179,7 @@ parse_apps(const std::vector<BaseApp> &apps,
         if (support_hdr && std::getenv("WOLF_NATIVE_GL_HDR") != nullptr) {
           producer_buffer_caps = "video/x-raw(memory:GLMemory), format=RGB10A2_LE";
         } else if (support_hdr && producer_buffer_caps.find("memory:VulkanImage") != std::string::npos &&
-            !uses_vulkan_download && !has_explicit_p010) {
+                   !uses_vulkan_download && !has_explicit_p010) {
           producer_buffer_caps = "video/x-raw(memory:VulkanImage), format=P010_10LE, colorimetry=bt2100-pq";
         } else if (support_hdr && producer_buffer_caps.find("memory:DMABuf") != std::string::npos) {
           // DMA_DRM is required by waylanddisplaysrc/interpipe for a DRM-format
@@ -242,6 +242,7 @@ parse_apps(const std::vector<BaseApp> &apps,
                         .opus_gst_pipeline = opus_gst_pipeline,
                         .start_virtual_compositor = app.start_virtual_compositor.value_or(true),
                         .start_audio_server = app.start_audio_server.value_or(true),
+                        .controller_create_screenshot = app.controller_create_screenshot.value_or(false),
                         .runner = get_runner(app.runner, ev_bus)}};
       }) |                                                  //
       ranges::to<immer::vector<immer::box<events::App>>>(); //
@@ -507,8 +508,8 @@ Config load_or_default(const std::string &source,
                 .support_hdr = hevc_encoder.has_value() || hardware_av1,
                 .paired_clients = clients_atom,
                 .profiles = profiles_atom,
-                .runtime_settings = std::make_shared<immer::atom<RuntimeSettings>>(
-                    RuntimeSettings{.single_player_disconnect_grace_seconds = cfg.runtime.single_player_disconnect_grace_seconds})};
+                .runtime_settings = std::make_shared<immer::atom<RuntimeSettings>>(RuntimeSettings{
+                    .single_player_disconnect_grace_seconds = cfg.runtime.single_player_disconnect_grace_seconds})};
 }
 
 void pair(const Config &cfg, const PairedClient &client) {
@@ -607,6 +608,42 @@ void update_profiles(const Config &cfg, const ProfilesList &profiles) {
                  }) | //
                  ranges::to_vector;
   rfl::toml::save(cfg.config_source, tml);
+}
+
+bool update_app_settings(const Config &cfg,
+                         std::string_view profile_id,
+                         std::string_view app_id,
+                         std::optional<bool> support_hdr,
+                         std::optional<bool> start_virtual_compositor,
+                         std::optional<bool> start_audio_server,
+                         std::optional<bool> controller_create_screenshot) {
+  auto tml = rfl::toml::load<WolfConfig, rfl::DefaultIfMissing>(cfg.config_source).value();
+  for (auto &profile : tml.profiles) {
+    if (profile.id != profile_id) {
+      continue;
+    }
+    for (auto &app : profile.apps) {
+      if (generate_app_id(app) != app_id) {
+        continue;
+      }
+      if (support_hdr) {
+        app.support_hdr = *support_hdr;
+      }
+      if (start_virtual_compositor) {
+        app.start_virtual_compositor = *start_virtual_compositor;
+      }
+      if (start_audio_server) {
+        app.start_audio_server = *start_audio_server;
+      }
+      if (controller_create_screenshot) {
+        app.controller_create_screenshot = *controller_create_screenshot;
+      }
+      rfl::toml::save(cfg.config_source, tml);
+      return true;
+    }
+    return false;
+  }
+  return false;
 }
 
 } // namespace state
