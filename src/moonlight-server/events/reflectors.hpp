@@ -190,6 +190,8 @@ template <> struct Reflector<events::StreamSession> {
     int video_height;
     int video_refresh_rate;
 
+    bool hdr_output_requested;
+
     int audio_channel_count;
 
     std::optional<std::string> app_id;
@@ -205,6 +207,7 @@ template <> struct Reflector<events::StreamSession> {
             .video_width = v.display_mode.width,
             .video_height = v.display_mode.height,
             .video_refresh_rate = v.display_mode.refreshRate,
+            .hdr_output_requested = v.hdr_output_requested,
             .audio_channel_count = v.audio_channel_count,
             .app_id = v.app->base.id,
             .client_id = std::to_string(v.session_id),

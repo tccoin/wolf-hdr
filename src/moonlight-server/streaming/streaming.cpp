@@ -596,6 +596,11 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
       fmt::arg("vk_b_frames", utils::get_env("WOLF_VULKAN_B_FRAMES", "0")),
       fmt::arg("color_space", color_space),
       fmt::arg("color_range", color_range),
+      // The current nvcodec default uses this named field instead of a literal
+      // `profile=main`.  It must be resolved here (rather than relying on a
+      // string replacement above), otherwise fmt throws "argument not found"
+      // as soon as an HEVC session starts.  An HDR transport requires Main10.
+      fmt::arg("hevc_profile", video_session->hdr_requested ? "main-10" : "main"),
       fmt::arg("render_node", video_session->render_node),
       fmt::arg("host_port", video_session->port));
   logs::log(logs::debug, "Starting video pipeline: \n{}", pipeline);

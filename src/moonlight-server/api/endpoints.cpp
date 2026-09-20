@@ -27,7 +27,7 @@ void UnixSocketServer::endpoint_UpdateRuntimeSettings(const wolf::api::HTTPReque
     return;
   }
 
-  constexpr int MAX_DISCONNECT_GRACE_SECONDS = 60 * 60;
+  constexpr int MAX_DISCONNECT_GRACE_SECONDS = 12 * 60 * 60;
   auto current = state_->app_state->config->runtime_settings->load();
   auto next = *current;
   if (update->single_player_disconnect_grace_seconds) {
@@ -35,7 +35,8 @@ void UnixSocketServer::endpoint_UpdateRuntimeSettings(const wolf::api::HTTPReque
     if (seconds < 0 || seconds > MAX_DISCONNECT_GRACE_SECONDS) {
       send_http(socket,
                 400,
-                rfl::json::write(GenericErrorResponse{.error = "single_player_disconnect_grace_seconds must be 0..3600"}));
+                rfl::json::write(
+                    GenericErrorResponse{.error = "single_player_disconnect_grace_seconds must be 0..43200"}));
       return;
     }
     next.single_player_disconnect_grace_seconds = seconds;

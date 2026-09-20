@@ -61,7 +61,10 @@ void RunDocker::run(std::string_view session_id,
   // Keep this capability scoped to the Steam runner instead of granting it to
   // every Wolf application container.
   std::error_code uinput_error;
-  if (this->container.name == "WolfSteam" &&
+  const bool has_uinput_device = std::any_of(devices.begin(), devices.end(), [](const Device &device) {
+    return device.path_on_host == "/dev/uinput" && device.path_in_container == "/dev/uinput";
+  });
+  if (this->container.name == "WolfSteam" && !has_uinput_device &&
       std::filesystem::is_character_file("/dev/uinput", uinput_error)) {
     devices.push_back(Device{.path_on_host = "/dev/uinput",
                              .path_in_container = "/dev/uinput",
@@ -70,15 +73,6 @@ void RunDocker::run(std::string_view session_id,
 
   std::vector<MountPoint> mounts;
   mounts.insert(mounts.end(), this->container.mounts.begin(), this->container.mounts.end());
-  // Steam Input's XInput emulation is created after the container starts.  A
-  // per-node device mapping is therefore insufficient: the new event node
-  // never becomes visible to Proton.  Give only the Steam runner a live,
-  // read-only view of the input directory so both the Moonlight pad and the
-  // Steam-created virtual pad remain visible for the whole session.
-  if (this->container.name == "WolfSteam" &&
-      std::filesystem::is_directory("/dev/input", uinput_error)) {
-    mounts.push_back(MountPoint{.source = "/dev/input", .destination = "/dev/input", .mode = "ro"});
-  }
   for (const auto &path : paths) {
     mounts.insert(mounts.end(), MountPoint{.source = path.first, .destination = path.second, .mode = "rw"});
   }
