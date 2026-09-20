@@ -33,11 +33,11 @@ export VKD3D_DISABLE_EXTENSIONS=VK_KHR_present_wait
 # complete WSI chain is present before Proton creates its Vulkan instance.
 export VK_INSTANCE_LAYERS="${VK_INSTANCE_LAYERS:+${VK_INSTANCE_LAYERS}:}VK_LAYER_FROG_gamescope_wsi_x86_64"
 
-# The Steam Overlay is another implicit Vulkan layer.  On Cyberpunk it can
-# claim the DXGI swapchain before Gamescope WSI sees it, which produces the
-# "non-Gamescope swapchain" dialog.  This game-only session has no need for
-# the overlay, so keep the WSI chain unambiguous.
-export DISABLE_VK_LAYER_VALVE_steam_overlay_1=1
+# Keep Steam Overlay enabled so the tile's optional DualSense Create -> F12
+# shortcut reaches Steam's screenshot handler.  Gamescope WSI remains an
+# explicit application layer above, so it still owns HDR surface creation.
+unset DISABLE_VK_LAYER_VALVE_steam_overlay_1
+export ENABLE_VK_LAYER_VALVE_steam_overlay_1=1
 # Fossilize sits above Gamescope WSI in Steam's implicit Vulkan stack and
 # prevents the WSI layer from seeing the game's surface creation.  It is only
 # the shader-cache capture layer; disabling it for this dedicated HDR tile
@@ -48,7 +48,7 @@ export DISABLE_VK_LAYER_VALVE_steam_fossilize_1=1
 # the Vulkan loader's layer filter as well: it is evaluated before a layer's
 # own enable rule, while VK_INSTANCE_LAYERS below/above still forces Gamescope
 # WSI to remain in the chain.
-export VK_LOADER_LAYERS_DISABLE="${VK_LOADER_LAYERS_DISABLE:+${VK_LOADER_LAYERS_DISABLE},}VK_LAYER_VALVE_steam_fossilize_64,VK_LAYER_VALVE_steam_overlay_64"
+export VK_LOADER_LAYERS_DISABLE="${VK_LOADER_LAYERS_DISABLE:+${VK_LOADER_LAYERS_DISABLE},}VK_LAYER_VALVE_steam_fossilize_64"
 
 # Keep Cyberpunk in front for this dedicated game-only session.  In particular,
 # do not let an early Xwayland connection failure terminate the watcher before
