@@ -596,6 +596,10 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
       fmt::arg("vk_b_frames", utils::get_env("WOLF_VULKAN_B_FRAMES", "0")),
       fmt::arg("color_space", color_space),
       fmt::arg("color_range", color_range),
+      // The nvcodec conversion template carries this separately from the
+      // encoder profile.  Supplying both keeps the raw CUDA caps and encoded
+      // HEVC profile in the same bit depth, including for HDR P010 sessions.
+      fmt::arg("pixel_format", video_session->hdr_requested ? "P010_10LE" : "NV12"),
       // The current nvcodec default uses this named field instead of a literal
       // `profile=main`.  It must be resolved here (rather than relying on a
       // string replacement above), otherwise fmt throws "argument not found"
