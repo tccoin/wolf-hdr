@@ -264,7 +264,6 @@ impl State {
     pub fn pointer_button(&mut self, event_time_msec: u32, button_code: u32, state: ButtonState) {
         self.last_pointer_movement = Instant::now();
         let serial = SERIAL_COUNTER.next_serial();
-
         if ButtonState::Pressed == state {
             self.update_keyboard_focus(serial);
         };
@@ -580,6 +579,7 @@ mod tests {
                 &dh,
                 &libinput_context,
                 event_loop.handle(),
+                false,
             );
 
             TestState { state }

@@ -12,8 +12,11 @@
 #include <gst/video/video.h>
 
 struct WolfHdrGl {
+  gint ref_count;
   GstGLDisplay *display;
   GstGLContext *context;
+  GMutex cleanup_lock;
+  GPtrArray *retired_cleanups;
   GLuint sdr_to_pq_program;
   GLuint fullscreen_vao;
   GLuint fbo;
@@ -35,16 +38,42 @@ typedef struct {
   guint offset;
   guint64 modifier;
   gboolean native_pq;
+  guint32 fourcc;
   GLuint source_texture;
 } ImportJob;
 
 typedef struct {
+  WolfHdrGl *bridge;
   GstGLContext *context;
   EGLDisplay display;
   EGLImageKHR image;
   GLuint texture;
   GLuint source_texture;
+  /* The downstream encoder may retain/copy wrapped GL memory while recycling
+   * buffers. Keep teardown idempotent and defer descriptor deallocation to
+   * the owning bridge, after its pipeline has stopped. */
+  gint released;
 } TextureCleanup;
+
+static WolfHdrGl *
+wolf_hdr_gl_ref (WolfHdrGl *bridge)
+{
+  g_atomic_int_inc (&bridge->ref_count);
+  return bridge;
+}
+
+static void
+wolf_hdr_gl_unref (WolfHdrGl *bridge)
+{
+  if (bridge == NULL || !g_atomic_int_dec_and_test (&bridge->ref_count))
+    return;
+  if (bridge->retired_cleanups != NULL)
+    g_ptr_array_unref (bridge->retired_cleanups);
+  g_mutex_clear (&bridge->cleanup_lock);
+  gst_clear_object (&bridge->context);
+  gst_clear_object (&bridge->display);
+  g_free (bridge);
+}
 
 static const gchar sdr_to_pq_vertex_shader[] =
     "#version 330\n"
@@ -157,12 +186,22 @@ free_texture_cleanup (gpointer user_data)
 {
   TextureCleanup *cleanup = user_data;
 
+  if (!g_atomic_int_compare_and_exchange (&cleanup->released, 0, 1)) {
+    GST_WARNING ("HDR GL bridge: duplicate wrapped-texture destroy notify");
+    return;
+  }
+
   /* GstGLMemory invokes its user notify after its own GL-thread cleanup. Keep
    * a context reference here so deleting our wrapped texture remains safe. */
   gst_gl_context_thread_add (cleanup->context, destroy_texture_on_gl_thread,
       cleanup);
   gst_object_unref (cleanup->context);
-  g_free (cleanup);
+  g_mutex_lock (&cleanup->bridge->cleanup_lock);
+  g_ptr_array_add (cleanup->bridge->retired_cleanups, cleanup);
+  g_mutex_unlock (&cleanup->bridge->cleanup_lock);
+  /* Releases the reference acquired when this texture was handed to
+   * GStreamer. The last notification owns the final bridge teardown. */
+  wolf_hdr_gl_unref (cleanup->bridge);
 }
 
 static void
@@ -184,7 +223,7 @@ import_ab30_on_gl_thread (GstGLContext *context, gpointer user_data)
   const EGLint attributes[] = {
     EGL_WIDTH, (EGLint) job->width,
     EGL_HEIGHT, (EGLint) job->height,
-    EGL_LINUX_DRM_FOURCC_EXT, DRM_FORMAT_ABGR2101010,
+    EGL_LINUX_DRM_FOURCC_EXT, (EGLint) job->fourcc,
     EGL_DMA_BUF_PLANE0_FD_EXT, job->fd,
     EGL_DMA_BUF_PLANE0_OFFSET_EXT, (EGLint) job->offset,
     EGL_DMA_BUF_PLANE0_PITCH_EXT, (EGLint) job->stride,
@@ -192,12 +231,32 @@ import_ab30_on_gl_thread (GstGLContext *context, gpointer user_data)
     EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT, (EGLint) (job->modifier >> 32),
     EGL_NONE
   };
+  /* NVIDIA advertises some block-linear AB30 modifiers through dma-buf, but
+   * rejects those modifier attributes when importing into this headless EGL
+   * display. Retry the legacy import form on that path; the driver can then
+   * select its compatible layout instead of failing the entire HDR stream. */
+  const EGLint fallback_attributes[] = {
+    EGL_WIDTH, (EGLint) job->width,
+    EGL_HEIGHT, (EGLint) job->height,
+    EGL_LINUX_DRM_FOURCC_EXT, (EGLint) job->fourcc,
+    EGL_DMA_BUF_PLANE0_FD_EXT, job->fd,
+    EGL_DMA_BUF_PLANE0_OFFSET_EXT, (EGLint) job->offset,
+    EGL_DMA_BUF_PLANE0_PITCH_EXT, (EGLint) job->stride,
+    EGL_NONE
+  };
 
   job->image = create_image (display, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT,
       NULL, attributes);
   if (job->image == EGL_NO_IMAGE_KHR) {
-    GST_ERROR ("HDR GL bridge: eglCreateImageKHR(AB30) failed (0x%x)", eglGetError ());
-    return;
+    EGLint modifier_error = eglGetError ();
+    GST_WARNING ("HDR GL bridge: modifier-aware AB30 import failed (0x%x); retrying compatibility import",
+        modifier_error);
+    job->image = create_image (display, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT,
+        NULL, fallback_attributes);
+    if (job->image == EGL_NO_IMAGE_KHR) {
+      GST_ERROR ("HDR GL bridge: compatibility eglCreateImageKHR(AB30) failed (0x%x)", eglGetError ());
+      return;
+    }
   }
 
   gl->GenTextures (1, &job->texture);
@@ -257,6 +316,10 @@ wolf_hdr_gl_new (void)
   GError *error = NULL;
   WolfHdrGl *bridge = g_new0 (WolfHdrGl, 1);
 
+  g_atomic_int_set (&bridge->ref_count, 1);
+  g_mutex_init (&bridge->cleanup_lock);
+  bridge->retired_cleanups = g_ptr_array_new_with_free_func (g_free);
+
   bridge->display = GST_GL_DISPLAY (gst_gl_display_egl_new_surfaceless ());
   if (bridge->display == NULL)
     goto fail;
@@ -295,11 +358,7 @@ fail:
 void
 wolf_hdr_gl_free (WolfHdrGl *bridge)
 {
-  if (bridge == NULL)
-    return;
-  gst_clear_object (&bridge->context);
-  gst_clear_object (&bridge->display);
-  g_free (bridge);
+  wolf_hdr_gl_unref (bridge);
 }
 
 gboolean
@@ -344,12 +403,25 @@ wolf_hdr_gl_import_ab30_dmabuf (WolfHdrGl *bridge, GstBuffer *input,
   job.stride = meta->stride[0];
   job.offset = meta->offset[0];
   job.modifier = modifier;
-  job.native_pq = native_pq;
+  switch (meta->format) {
+    case GST_VIDEO_FORMAT_RGBA:
+      job.fourcc = DRM_FORMAT_ABGR8888;
+      job.native_pq = FALSE;
+      break;
+    case GST_VIDEO_FORMAT_RGB10A2_LE:
+      job.fourcc = DRM_FORMAT_ABGR2101010;
+      job.native_pq = native_pq;
+      break;
+    default:
+      GST_ERROR ("HDR GL bridge: unsupported input format %s",
+          gst_video_format_to_string (meta->format));
+      return NULL;
+  }
   job.image = EGL_NO_IMAGE_KHR;
   gst_gl_context_thread_add (bridge->context, import_ab30_on_gl_thread, &job);
   if (!job.ok) {
     if (job.image != EGL_NO_IMAGE_KHR) {
-      TextureCleanup orphan = { bridge->context,
+      TextureCleanup orphan = { bridge, bridge->context,
           GST_GL_DISPLAY_EGL (gst_gl_context_get_display (bridge->context))->display,
           job.image, job.texture, job.source_texture };
       destroy_texture_on_gl_thread (bridge->context, &orphan);
@@ -365,6 +437,7 @@ wolf_hdr_gl_import_ab30_dmabuf (WolfHdrGl *bridge, GstBuffer *input,
   }
 
   cleanup = g_new0 (TextureCleanup, 1);
+  cleanup->bridge = wolf_hdr_gl_ref (bridge);
   cleanup->context = GST_GL_CONTEXT (gst_object_ref (bridge->context));
   cleanup->display = GST_GL_DISPLAY_EGL (
       gst_gl_context_get_display (bridge->context))->display;
@@ -379,16 +452,29 @@ wolf_hdr_gl_import_ab30_dmabuf (WolfHdrGl *bridge, GstBuffer *input,
     free_texture_cleanup (cleanup);
     return NULL;
   }
-  allocator = gst_gl_memory_allocator_get_default (bridge->context);
+  /* The default for a desktop GL 3 context is the PBO allocator.  That
+   * allocator adds a CPU download path for wrapped textures; this bridge
+   * hands NVENC an EGL-imported/output-only texture and must remain entirely
+   * on the GL path.  In the SDR-to-PQ case the PBO path corrupts its wrapped
+   * texture lifetime as buffers are recycled. */
+  allocator = GST_GL_MEMORY_ALLOCATOR (
+      gst_allocator_find (GST_GL_MEMORY_ALLOCATOR_NAME));
+  if (allocator == NULL) {
+    GST_ERROR ("HDR GL bridge: GLMemory allocator is unavailable");
+    free_texture_cleanup (cleanup);
+    return NULL;
+  }
   output = gst_buffer_new ();
   wrapped_texture[0] = GUINT_TO_POINTER (job.texture);
   if (!gst_gl_memory_setup_buffer (allocator, output, params, NULL,
           wrapped_texture, 1)) {
     gst_gl_allocation_params_free ((GstGLAllocationParams *) params);
     gst_buffer_unref (output);
+    gst_object_unref (allocator);
     return NULL;
   }
   gst_gl_allocation_params_free ((GstGLAllocationParams *) params);
+  gst_object_unref (allocator);
 
   /* Keep the compositor's fd-backed buffer alive until NVENC releases the
    * imported texture. */

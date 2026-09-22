@@ -93,6 +93,11 @@ pub struct Settings {
     /// NVENC. Off by default: SDR continues to use the established CUDA path.
     #[cfg(feature = "gl-hdr")]
     gl_hdr: bool,
+    /// Keep the compositor's own HDR transport, but do not advertise 10-bit
+    /// client dmabufs. Nested KWin on NVIDIA otherwise selects a block-linear
+    /// AB30 client buffer which NVIDIA's EGL importer cannot safely import.
+    #[cfg(feature = "gl-hdr")]
+    restrict_hdr_dmabufs: bool,
     #[cfg(feature = "gl-hdr")]
     gl_hdr_bridge: Option<HdrGlBridge>,
     /// Modifier of the AB30 render target selected in set_caps(). This is required for the
@@ -366,6 +371,12 @@ impl ObjectImpl for WaylandDisplaySrc {
                     )
                     .default_value(false)
                     .build(),
+                #[cfg(feature = "gl-hdr")]
+                glib::ParamSpecBoolean::builder("restrict-hdr-dmabufs")
+                    .nick("Restrict HDR client dmabufs")
+                    .blurb("Do not advertise 10-bit/fp16 client dmabufs while retaining the HDR transport; use for nested compositors whose NVIDIA EGL import path is unsafe.")
+                    .default_value(false)
+                    .build(),
             ]
         });
 
@@ -446,6 +457,11 @@ impl ObjectImpl for WaylandDisplaySrc {
                 let mut settings = self.settings.lock().unwrap();
                 settings.gl_hdr = value.get::<bool>().expect("Type checked upstream");
             }
+            #[cfg(feature = "gl-hdr")]
+            "restrict-hdr-dmabufs" => {
+                let mut settings = self.settings.lock().unwrap();
+                settings.restrict_hdr_dmabufs = value.get::<bool>().expect("Type checked upstream");
+            }
             _ => unreachable!(),
         }
     }
@@ -496,6 +512,11 @@ impl ObjectImpl for WaylandDisplaySrc {
             "gl-hdr" => {
                 let settings = self.settings.lock().unwrap();
                 settings.gl_hdr.to_value()
+            }
+            #[cfg(feature = "gl-hdr")]
+            "restrict-hdr-dmabufs" => {
+                let settings = self.settings.lock().unwrap();
+                settings.restrict_hdr_dmabufs.to_value()
             }
             _ => unreachable!(),
         }
@@ -1305,12 +1326,24 @@ impl BaseSrcImpl for WaylandDisplaySrc {
                 && gst_video::VideoInfo::from_caps(caps)
                     .is_ok_and(|info| info.format() == VideoFormat::Rgb10a2Le);
             if is_gl_hdr {
-                let base_video_info = gst_video::VideoInfo::from_caps(caps)
+                let mut base_video_info = gst_video::VideoInfo::from_caps(caps)
                     .map_err(|_| gst::loggable_error!(CAT, "invalid GL HDR video caps"))?;
                 if !self.settings.lock().unwrap().gl_hdr {
                     return Err(gst::loggable_error!(CAT, "GL HDR caps negotiated while gl-hdr=false"));
                 }
-                const DRM_FORMAT_AB30: u32 = u32::from_le_bytes(*b"AB30");
+                let restricted = self.settings.lock().unwrap().restrict_hdr_dmabufs;
+                let render_fourcc = if restricted {
+                    // Keep NVIDIA/KWin on its safe 8-bit GBM render target.
+                    // Only the bridge's separate GL texture contains 10-bit PQ.
+                    base_video_info = gst_video::VideoInfo::builder(
+                        VideoFormat::Rgba, base_video_info.width(), base_video_info.height())
+                        .fps(base_video_info.fps())
+                        .build()
+                        .map_err(|_| gst::loggable_error!(CAT, "invalid SDR bridge video info"))?;
+                    u32::from_le_bytes(*b"AB24")
+                } else {
+                    u32::from_le_bytes(*b"AB30")
+                };
                 // The caps query can race the DRM renderer setup on a freshly
                 // created lobby. Until the renderer publishes its DMA formats,
                 // AB30 is temporarily absent even though it will be available
@@ -1327,7 +1360,7 @@ impl BaseSrcImpl for WaylandDisplaySrc {
                                     .display
                                     .get_supported_dma_formats()
                                     .iter()
-                                    .find(|format| format.code as u32 == DRM_FORMAT_AB30)
+                                    .find(|format| format.code as u32 == render_fourcc)
                                     .cloned()
                             });
                         if format.is_none() && attempt < 99 {
@@ -1335,7 +1368,8 @@ impl BaseSrcImpl for WaylandDisplaySrc {
                         }
                         format
                     })
-                    .ok_or_else(|| gst::loggable_error!(CAT, "renderer did not publish AB30 for GL HDR within 1 second"))?;
+                    .ok_or_else(|| gst::loggable_error!(CAT, "renderer did not publish GL bridge render format within 1 second"))?;
+                gst::info!(CAT, "HDR GL bridge: render target {:?}, restricted SDR={}", format.code, restricted);
                 let modifier: u64 = format.modifier.into();
                 let dma_info = VideoInfoDmaDrm::new(base_video_info, format.code as u32, modifier);
                 self.settings.lock().unwrap().gl_hdr_modifier = Some(modifier);
@@ -1417,12 +1451,13 @@ impl BaseSrcImpl for WaylandDisplaySrc {
         }
 
         #[cfg(feature = "cuda")]
-        let (render_node, input_devices, have_cuda_context) = {
+        let (render_node, input_devices, have_cuda_context, restrict_hdr_dmabufs) = {
             let settings = self.settings.lock().unwrap();
             (
                 settings.render_node.clone(),
                 settings.input_devices.clone(),
                 settings.cuda_context.is_some(),
+                settings.restrict_hdr_dmabufs,
             )
         };
 
@@ -1444,6 +1479,7 @@ impl BaseSrcImpl for WaylandDisplaySrc {
                 // Hand this element's compositor thread a clone of OUR share, so producer +
                 // compositor + encoder resolve THIS element's device.
                 Arc::clone(&self.vulkan_share),
+                restrict_hdr_dmabufs,
             )
         }) else {
             return Err(gst::error_msg!(

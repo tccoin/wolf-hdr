@@ -182,12 +182,18 @@ impl SurfaceHdrColor {
 /// (`HDR_MASTERING` / `HDR_CLL` in the gst plugin): BT.2020 primaries, 1000-nit max /
 /// 0.0001-nit min, MaxCLL 1000, MaxFALL 400.
 fn hdr_output_description() -> ImageDescription {
+    let reference_white = std::env::var("WOLF_SDR_REFERENCE_WHITE")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|value| (1..=1000).contains(value))
+        .unwrap_or(203);
     ImageDescription {
         transfer: Some(TransferFunction::St2084Pq),
         primaries: Some(Primaries::Bt2020),
         primaries_chromaticity: Some(BT2020_PRIMARIES),
-        // PQ default luminances per the protocol: min 0.005, max 10000, reference 203.
-        luminances: Some((50, 10000, 203)),
+        // Keep the nested compositor's SDR white consistent with the GL bridge.
+        // PQ's absolute 10000-nit coding range is independent of SDR white.
+        luminances: Some((50, 10000, reference_white)),
         mastering: Some(MasteringDisplay {
             primaries: BT2020_PRIMARIES,
             min_lum: 1, // 0.0001 cd/m² * 10000
@@ -247,6 +253,34 @@ pub struct ParamsData(Mutex<ParamsBuilder>);
 /// second `get_surface` for the same surface raises `surface_exists`.
 #[derive(Default)]
 struct ColorSurfaceAttached(Cell<bool>);
+
+/// Whether a surface has explicitly opted into the wp color-management protocol
+/// as a content surface. A 10-bit buffer from such a client is not, by itself,
+/// evidence of PQ.
+pub fn surface_uses_color_management(surface: &WlSurface) -> bool {
+    with_states(surface, |states| {
+        states
+            .data_map
+            .get::<ColorSurfaceAttached>()
+            .is_some_and(|marker| marker.0.get())
+    })
+}
+
+/// KWin's nested compositor requests output feedback and then presents its
+/// already colour-converted virtual-output buffer. With Wolf's HDR output
+/// description, its 10-bit buffer is PQ even though the toplevel itself does
+/// not set a surface image description.
+#[derive(Default)]
+struct ColorSurfaceOutputFeedback(Cell<bool>);
+
+pub fn surface_uses_output_color_feedback(surface: &WlSurface) -> bool {
+    with_states(surface, |states| {
+        states
+            .data_map
+            .get::<ColorSurfaceOutputFeedback>()
+            .is_some_and(|marker| marker.0.get())
+    })
+}
 
 /// Read the HDR flag a client set on `surface` (false if none / not color-managed).
 ///
@@ -357,12 +391,19 @@ impl GlobalDispatch<WpColorManagerV1, ()> for State {
         data_init: &mut DataInit<'_, State>,
     ) {
         let manager = data_init.init(resource, ());
+        tracing::info!("color_mgmt: client bound wp_color_manager_v1");
 
         // Advertise everything the parametric creator below actually accepts. The
         // `done` event terminates the burst.
         manager.supported_intent(RenderIntent::Perceptual);
 
         manager.supported_feature(Feature::Parametric);
+        // KWin's Wayland backend requires the coordinate-primaries capability
+        // before it creates output surface feedback.  It uses that feedback to
+        // learn that this nested output is PQ/BT.2020 and to transform the
+        // Plasma SDR desktop correctly instead of presenting linear SDR in a
+        // 10-bit HDR render target.
+        manager.supported_feature(Feature::SetPrimaries);
         manager.supported_feature(Feature::SetMasteringDisplayPrimaries);
         manager.supported_feature(Feature::SetLuminances);
 
@@ -418,7 +459,22 @@ impl Dispatch<WpColorManagerV1, ()> for State {
                 }
             }
             Request::GetSurfaceFeedback { id, surface } => {
-                data_init.init(id, ColorSurfaceData::new(&surface));
+                tracing::info!(surface = ?surface.id(), "color_mgmt: client requested surface feedback");
+                with_states(&surface, |states| {
+                    let marker = states
+                        .data_map
+                        .get_or_insert::<ColorSurfaceOutputFeedback, _>(ColorSurfaceOutputFeedback::default);
+                    marker.0.set(true);
+                });
+                let feedback = data_init.init(id, ColorSurfaceData::new(&surface));
+                // A newly-created feedback object has no initial preferred state
+                // until the compositor announces one. KWin's nested Wayland
+                // backend waits for this event before it calls `get_preferred`,
+                // so omitting it leaves the virtual output SDR / HDR-incapable
+                // despite the output itself advertising a PQ BT.2020 description.
+                // The identity is only a change token here: clients that do not
+                // already hold this description request it through get_preferred.
+                feedback.preferred_changed(next_identity());
             }
             Request::CreateParametricCreator { obj } => {
                 data_init.init(obj, ParamsData::default());
@@ -627,7 +683,12 @@ impl Dispatch<WpImageDescriptionCreatorParamsV1, ParamsData> for State {
                 b.mastering_primaries = Some([r_x, r_y, g_x, g_y, b_x, b_y, w_x, w_y]);
             }
             Request::SetMasteringLuminance { min_lum, max_lum } => {
-                if max_lum <= min_lum {
+                // The protocol uses different units: min_lum is 0.0001 cd/m²
+                // while max_lum is cd/m². Compare in the same unit. KWin's
+                // valid 0.2/80 cd/m² volume was previously rejected by the
+                // raw integer comparison (2000 > 80), tearing down its
+                // Wayland connection before Plasma could present anything.
+                if max_lum.saturating_mul(10_000) <= min_lum {
                     obj.post_error(Error::InvalidLuminance, "max_lum must exceed min_lum");
                     return;
                 }
@@ -698,7 +759,7 @@ impl Dispatch<WpImageDescriptionCreatorParamsV1, ParamsData> for State {
 
 impl Dispatch<WpImageDescriptionV1, ImageDescriptionData> for State {
     fn request(
-        _state: &mut State,
+        state: &mut State,
         _client: &Client,
         obj: &WpImageDescriptionV1,
         request: wp_image_description_v1::Request,
@@ -717,7 +778,18 @@ impl Dispatch<WpImageDescriptionV1, ImageDescriptionData> for State {
                     return;
                 }
                 let info = data_init.init(information, ());
-                send_image_description_info(&info, &data.desc);
+                let description = data.desc.clone();
+                // `done` is a destructor event. The libwayland backend installs
+                // this new resource's ObjectData only AFTER request() returns.
+                // Sending done synchronously frees the child userdata first,
+                // then resource_dispatcher writes to that freed allocation.
+                // KWin requests this feedback at startup: defer to the next
+                // event-loop idle so initialization has completed before done.
+                state.handle.insert_idle(move |_| {
+                    if info.is_alive() {
+                        send_image_description_info(&info, &description);
+                    }
+                });
             }
             Request::Destroy => {}
             _ => {}

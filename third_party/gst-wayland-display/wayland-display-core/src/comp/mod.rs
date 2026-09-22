@@ -263,6 +263,7 @@ impl State {
         dh: &DisplayHandle,
         input_context: &Libinput,
         event_loop_handle: LoopHandle<'static, State>,
+        restrict_hdr_dmabufs: bool,
     ) -> Self {
         let clock = Clock::new();
 
@@ -283,7 +284,7 @@ impl State {
         // advertising it makes HDR clients enable their HDR path and tags HDR surfaces,
         // but the buffer-import side isn't ready yet, so it must be opt-in. When unset the
         // global is never created and behaviour is exactly as before.
-        let color_mgmt_global = if std::env::var("WOLF_HDR_CM").is_ok() {
+        let color_mgmt_global = if std::env::var("WOLF_HDR_CM").is_ok() && !restrict_hdr_dmabufs {
             tracing::info!(
                 "WOLF_HDR_CM set: advertising wp_color_manager_v1 (HDR-capable PQ/BT2020 output)"
             );
@@ -295,7 +296,7 @@ impl State {
         // frog_color_management_v1 (gamescope's HDR path). Same WOLF_HDR_CM gate; gamescope
         // does NOT speak wp_color_management_v1, so without this its real PQ signal + mastering
         // metadata never reach us. Writes the same shared SurfaceHdrColor as wp above.
-        let frog_color_mgmt_global = if std::env::var("WOLF_HDR_CM").is_ok() {
+        let frog_color_mgmt_global = if std::env::var("WOLF_HDR_CM").is_ok() && !restrict_hdr_dmabufs {
             tracing::info!(
                 "WOLF_HDR_CM set: advertising frog_color_management_v1 (gamescope HDR path)"
             );
@@ -321,8 +322,16 @@ impl State {
             // renderer can *import*, so HDR clients submit HDR (scRGB-fp16 / 10-bit PQ)
             // buffers instead of 8-bit sRGB. Only HDR-capable fourccs the renderer actually
             // imports are added; unset = exactly the render-target format set as before.
-            if std::env::var("WOLF_HDR_CM").is_ok() {
+            if std::env::var("WOLF_HDR_CM").is_ok() && !restrict_hdr_dmabufs {
                 advertise_hdr_dmabuf_formats(&renderer, &mut formats);
+            } else if restrict_hdr_dmabufs {
+                // `Bind::<Dmabuf>::supported_formats()` already contains the
+                // render target's 10-bit formats when the outer producer was
+                // negotiated as HDR.  Merely skipping the additional import
+                // formats is therefore insufficient: KWin still picks AB30.
+                // Remove every HDR fourcc from the *client* dmabuf global.
+                formats.retain(|format| !HDR_IMPORT_FOURCCS.contains(&format.code));
+                tracing::info!("WOLF_HDR_CM: restricting nested compositor to 8-bit client dmabufs");
             }
 
             let dmabuf_default_feedback =
@@ -779,6 +788,7 @@ pub(crate) fn init(
     envs_tx: Sender<Vec<CString>>,
     hdr_state_tx: Sender<Command>,
     vulkan_share: Arc<VulkanShare>,
+    restrict_hdr_dmabufs: bool,
 ) {
     let render_target = render.into();
     let _ = devices_tx.send(render_target.clone().as_devices());
@@ -794,7 +804,13 @@ pub(crate) fn init(
     let input_context = libinput_context.clone();
     let libinput_backend = LibinputInputBackend::new(libinput_context);
 
-    let mut state = State::new(&render_target, &dh, &input_context, event_loop.handle());
+    let mut state = State::new(
+        &render_target,
+        &dh,
+        &input_context,
+        event_loop.handle(),
+        restrict_hdr_dmabufs,
+    );
     state.vulkan_share = vulkan_share;
 
     // Wire the compositor -> element HDR-state reverse channel only under WOLF_HDR_CM;

@@ -26,7 +26,9 @@ use smithay::{
 };
 
 use crate::comp::{ClientState, FocusTarget, State};
-use crate::wayland::handlers::color_management::surface_is_hdr;
+use crate::wayland::handlers::color_management::{
+    surface_is_hdr, surface_uses_color_management, surface_uses_output_color_feedback,
+};
 
 /// Whether `WOLF_HDR_CM` is set (read once). Gates the per-surface client-buffer-format
 /// logging below, which would otherwise be hot in the commit path.
@@ -180,7 +182,38 @@ impl CompositorHandler for State {
             // not send the protocol metadata.
             let declared_pq = surface_is_hdr(surface);
             if let Some(fourcc) = committed_dmabuf_fourcc(surface) {
-                let pq = declared_pq || is_pq_fourcc(fourcc);
+                // A normal color-managed surface must explicitly declare PQ.
+                // KWin requests the HDR output feedback, but its virtual
+                // output still explicitly declares its transfer function. In
+                // particular, KWin currently emits BT.2020 primaries with an
+                // sRGB transfer for the Steam desktop. A 10-bit fourcc is a
+                // storage format, not proof of PQ; treating that surface as
+                // native PQ makes the client decode sRGB values as PQ (dark,
+                // yellow/green output). Honour the explicit description and
+                // send the SDR surface through the SDR-to-PQ bridge instead.
+                let pq = declared_pq
+                    // Legacy gamescope can submit a 10-bit PQ buffer without
+                    // any colour protocol. KWin is not that case: it uses
+                    // get_surface_feedback(), which deliberately has no
+                    // get_surface() attachment marker. Never let that legacy
+                    // fallback override KWin's explicitly-described SDR
+                    // virtual output.
+                    || (!surface_uses_color_management(surface)
+                        && !surface_uses_output_color_feedback(surface)
+                        && is_pq_fourcc(fourcc));
+                // This runs once per committed frame.  Keep the diagnostic at
+                // debug level: emitting an INFO record for every 165 Hz frame
+                // can saturate Docker's json log driver and stall the capture
+                // producer, which looks like a frozen Wolf UI session.
+                tracing::debug!(
+                    surface = ?surface.id(),
+                    ?fourcc,
+                    declared_pq,
+                    color_managed = surface_uses_color_management(surface),
+                    output_feedback = surface_uses_output_color_feedback(surface),
+                    pq,
+                    "HDR input classification"
+                );
                 let tracked_surface = self
                     .current_input_surface
                     .as_ref()
