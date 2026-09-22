@@ -119,21 +119,17 @@ std::vector<std::map<std::string, std::string>> PS5Joypad::get_udev_events() con
     }
   }
 
+  // Proton needs the raw Sony HID interface for native DualSense support.
+  // Without it, winebus synthesizes an Xbox controller from evdev even when
+  // Steam Input is disabled. SDL mapping belongs in the runner, not in device
+  // isolation: expose only this session's controller, never all host hidraw.
   if (!sys_nodes.empty()) {
-    // Add /dev/hidraw* device
-    // Used by Steam to access the LED status and who knows what else...
-    auto base_path =
-        std::filesystem::path(sys_nodes[0]) // /sys/devices/virtual/misc/uhid/0003:054C:0CE6.0016/input/input158
-            .parent_path()                  // "/sys/devices/virtual/misc/uhid/0003:054C:0CE6.0016/input/
-            .parent_path();                 // "/sys/devices/virtual/misc/uhid/0003:054C:0CE6.0016/
-
+    const auto base_path = std::filesystem::path(sys_nodes[0]).parent_path().parent_path();
     if (std::filesystem::exists(base_path / "hidraw")) {
-      auto hidraw_entries = std::filesystem::directory_iterator{base_path / "hidraw"};
-      for (auto hidraw_entry : hidraw_entries) {
-        auto dev_path = "/dev/" + hidraw_entry.path().filename().string();
+      for (const auto &hidraw_entry : std::filesystem::directory_iterator{base_path / "hidraw"}) {
+        const auto dev_path = "/dev/" + hidraw_entry.path().filename().string();
         auto sys_path = hidraw_entry.path().string();
-        sys_path.erase(0, 4); // Remove leading /sys/ from syspath TODO: what if it's not /sys/?
-
+        sys_path.erase(0, 4);
         auto event = gen_udev_base_event(dev_path, sys_path);
         event["SUBSYSTEM"] = "hidraw";
         events.emplace_back(event);
@@ -148,6 +144,27 @@ std::vector<std::map<std::string, std::string>> PS5Joypad::get_udev_events() con
 
 std::vector<std::pair<std::string, std::vector<std::string>>> PS5Joypad::get_udev_hw_db_entries() const {
   std::vector<std::pair<std::string, std::vector<std::string>>> result;
+
+  const auto sys_nodes = this->get_sys_nodes();
+  if (!sys_nodes.empty()) {
+    const auto hidraw_path = std::filesystem::path(sys_nodes[0]).parent_path().parent_path() / "hidraw";
+    if (std::filesystem::exists(hidraw_path)) {
+      for (const auto &node : std::filesystem::directory_iterator{hidraw_path}) {
+        const auto dev_path = "/dev/" + node.path().filename().string();
+        // Wine's udev enumeration requires an initialized device, not just
+        // an accessible character node. Keep the database session-local.
+        result.push_back({gen_udev_hw_db_filename(dev_path),
+                          {"E:ID_BUS=bluetooth",
+                           "E:ID_VENDOR_ID=054c",
+                           "E:ID_MODEL_ID=0ce6",
+                           "G:seat",
+                           "G:uaccess",
+                           "Q:seat",
+                           "Q:uaccess",
+                           "V:1"}});
+      }
+    }
+  }
 
   for (const auto sys_entry : this->get_sys_nodes()) {
     auto sys_nodes = std::filesystem::directory_iterator{sys_entry};

@@ -384,9 +384,8 @@ auto create_run_session(const SimpleWeb::CaseInsensitiveMultimap &headers,
   // Only the Vulkan video encoders require 64px CTB alignment. A VulkanImage producer
   // feeding NVENC does not, and rounding that path changes a requested 1920x1080 desktop
   // into 1920x1088 all the way through gamescope.
-  const bool uses_vulkan_encoder =
-      run_app.h264_gst_pipeline.find("vulkanh264enc") != std::string::npos ||
-      run_app.hevc_gst_pipeline.find("vulkanh265enc") != std::string::npos;
+  const bool uses_vulkan_encoder = run_app.h264_gst_pipeline.find("vulkanh264enc") != std::string::npos ||
+                                   run_app.hevc_gst_pipeline.find("vulkanh265enc") != std::string::npos;
   if (uses_vulkan_encoder && run_app.video_producer_buffer_caps.find("VulkanImage") != std::string::npos) {
     auto round_up_64 = [](int v) { return (v + 63) & ~63; };
     display_mode.width = round_up_64(display_mode.width);
@@ -395,8 +394,7 @@ auto create_run_session(const SimpleWeb::CaseInsensitiveMultimap &headers,
 
   auto surround_info = std::stoi(get_header(headers, "surroundAudioInfo").value_or("196610"));
   int channelCount = surround_info & (0xffff /* last 16 bits */);
-  const bool hdr_output_requested =
-      run_app.base.support_hdr && get_header(headers, "hdrMode").value_or("0") == "1";
+  const bool hdr_output_requested = run_app.base.support_hdr && get_header(headers, "hdrMode").value_or("0") == "1";
   logs::log(logs::info,
             "[HTTP] {} output requested for {}x{}@{}",
             hdr_output_requested ? "HDR" : "SDR",
@@ -472,7 +470,13 @@ void resume(const std::shared_ptr<typename SimpleWeb::Server<SimpleWeb::HTTPS>::
   if (old_session) {
     auto new_session =
         create_run_session(request->parse_query_string(), client_ip, current_client, state, *old_session->app);
-    if (state::has_same_video_output_contract(*old_session, *new_session)) {
+    const bool session_is_in_live_lobby =
+        state::get_lobby_by_connected_session(state->lobbies->load(), std::to_string(old_session->session_id))
+            .has_value();
+    const bool launcher_runner_is_gone = !old_session->runner_active->load(std::memory_order_acquire);
+
+    if (state::has_same_video_output_contract(*old_session, *new_session) &&
+        !(launcher_runner_is_gone && !session_is_in_live_lobby)) {
       // A transport reconnect with an identical mode can keep the compositor and
       // application alive. Only the RTP/crypto session is refreshed.
       new_session->wayland_display = std::move(old_session->wayland_display);
@@ -481,13 +485,20 @@ void resume(const std::shared_ptr<typename SimpleWeb::Server<SimpleWeb::HTTPS>::
       new_session->joypads = std::move(old_session->joypads);
       new_session->pen_tablet = std::move(old_session->pen_tablet);
       new_session->touch_screen = std::move(old_session->touch_screen);
+      new_session->runner_active = old_session->runner_active;
 
       state->running_sessions->update([&old_session, new_session](const immer::vector<events::StreamSession> ses_v) {
         return state::remove_session(ses_v, old_session.value()).push_back(*new_session);
       });
     } else {
+      if (launcher_runner_is_gone && !session_is_in_live_lobby) {
+        logs::log(logs::warning,
+                  "[HTTP] Resume found session {} without a live launcher runner; rebuilding it instead of "
+                  "reusing a dead compositor",
+                  old_session->session_id);
+      }
       logs::log(logs::info,
-                "[HTTP] Video output contract changed from {}x{}@{} {} to {}x{}@{} {}; restarting compositor",
+                "[HTTP] Restarting stream from {}x{}@{} {} to {}x{}@{} {}",
                 old_session->display_mode.width,
                 old_session->display_mode.height,
                 old_session->display_mode.refreshRate,

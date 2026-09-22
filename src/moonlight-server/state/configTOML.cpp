@@ -176,7 +176,11 @@ parse_apps(const std::vector<BaseApp> &apps,
         // for NVIDIA NVENC HDR instead of collapsing it to native Vulkan caps.
         const bool uses_vulkan_download = producer_buffer_caps.find("vulkandownload") != std::string::npos;
         const bool has_explicit_p010 = producer_buffer_caps.find("P010_10LE") != std::string::npos;
-        if (support_hdr && std::getenv("WOLF_NATIVE_GL_HDR") != nullptr) {
+        // Keep the native GL bridge as the default NVIDIA HDR route, but honour
+        // an application's explicit P010 request. Some NVIDIA EGL stacks can
+        // encode RGB10A2 but cannot import the compositor's AB30 dma-buf into
+        // an EGL image; those apps need the plugin's P010/CUDA producer path.
+        if (support_hdr && std::getenv("WOLF_NATIVE_GL_HDR") != nullptr && !has_explicit_p010) {
           producer_buffer_caps = "video/x-raw(memory:GLMemory), format=RGB10A2_LE";
         } else if (support_hdr && producer_buffer_caps.find("memory:VulkanImage") != std::string::npos &&
                    !uses_vulkan_download && !has_explicit_p010) {

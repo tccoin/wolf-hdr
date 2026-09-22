@@ -101,18 +101,19 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
 
           // Start Gstreamer producer pipeline
           std::thread([session, on_ready, gst_context = app_state->gst_context]() {
-            streaming::start_video_producer(std::to_string(session->session_id),
-                                            streaming::producer_caps_for_output(
-                                                session->app->video_producer_buffer_caps,
-                                                session->hdr_output_requested),
-                                            session->app->render_node,
-                                            {.width = session->display_mode.width,
-                                             .height = session->display_mode.height,
-                                             .refreshRate = session->display_mode.refreshRate},
-                                            session->hdr_output_requested,
-                                            gst_context,
-                                            on_ready,
-                                            session->event_bus);
+            streaming::start_video_producer(
+                std::to_string(session->session_id),
+                streaming::producer_caps_for_output(session->app->video_producer_buffer_caps,
+                                                    session->hdr_output_requested),
+                session->app->render_node,
+                {.width = session->display_mode.width,
+                 .height = session->display_mode.height,
+                 .refreshRate = session->display_mode.refreshRate},
+                session->hdr_output_requested,
+                false,
+                gst_context,
+                on_ready,
+                session->event_bus);
           }).detach();
         } else {
           // Create virtual devices
@@ -212,33 +213,38 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
           return;
         }
 
+        // This is deliberately set before the runner thread starts.  A
+        // transport reconnect in that small window must preserve this launch
+        // rather than start a competing runner for the same Moonlight session.
+        run_session->stream_session->runner_active->store(true, std::memory_order_release);
+
         std::thread([=]() {
-          start_runner(
-              run_session->runner,
-              *devices_q,
-              immer::box<RunnerArgs>{RunnerArgs{
-                  .session_id = session_id,
-                  .video_settings =
-                      {
-                          .width = run_session->stream_session->display_mode.width,
-                          .height = run_session->stream_session->display_mode.height,
-                          .refresh_rate = run_session->stream_session->display_mode.refreshRate,
-                          .wayland_render_node = run_session->stream_session->app->render_node,
-                          .runner_render_node = run_session->stream_session->app->render_node,
-                          .video_producer_buffer_caps = streaming::producer_caps_for_output(
-                              run_session->stream_session->app->video_producer_buffer_caps,
-                              run_session->stream_session->hdr_output_requested),
-                      },
-                  .wayland_display = run_session->stream_session->wayland_display->load(),
-                  .audio_server = audio_server,
-                  .audio_sink = run_session->stream_session->audio_sink->load(),
-                  .host = app_state->host,
-                  .app_local_state_folder = run_session->stream_session->app_local_state_folder,
-                  .app_host_state_folder = run_session->stream_session->app_host_state_folder,
-                  .xdg_runtime_dir = runtime_dir,
-                  .client_settings = run_session->stream_session->client_settings}});
+          start_runner(run_session->runner,
+                       *devices_q,
+                       immer::box<RunnerArgs>{
+                           RunnerArgs{.session_id = session_id,
+                                      .video_settings =
+                                          {
+                                              .width = run_session->stream_session->display_mode.width,
+                                              .height = run_session->stream_session->display_mode.height,
+                                              .refresh_rate = run_session->stream_session->display_mode.refreshRate,
+                                              .wayland_render_node = run_session->stream_session->app->render_node,
+                                              .runner_render_node = run_session->stream_session->app->render_node,
+                                              .video_producer_buffer_caps = streaming::producer_caps_for_output(
+                                                  run_session->stream_session->app->video_producer_buffer_caps,
+                                                  run_session->stream_session->hdr_output_requested),
+                                          },
+                                      .wayland_display = run_session->stream_session->wayland_display->load(),
+                                      .audio_server = audio_server,
+                                      .audio_sink = run_session->stream_session->audio_sink->load(),
+                                      .host = app_state->host,
+                                      .app_local_state_folder = run_session->stream_session->app_local_state_folder,
+                                      .app_host_state_folder = run_session->stream_session->app_host_state_folder,
+                                      .xdg_runtime_dir = runtime_dir,
+                                      .client_settings = run_session->stream_session->client_settings}});
 
           // Runner process ended
+          run_session->stream_session->runner_active->store(false, std::memory_order_release);
           if (run_session->stop_stream_when_over) {
             run_session->stream_session->wayland_display->store(nullptr);
             const auto current = state::get_session_by_id(app_state->running_sessions->load().get(),

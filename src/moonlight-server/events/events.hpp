@@ -41,6 +41,9 @@ struct UnplugDeviceEvent {
   std::string session_id;
   std::vector<std::map<std::string, std::string>> udev_events;
   std::vector<std::pair<std::string, std::vector<std::string>>> udev_hw_db_entries;
+  // A lobby migration must remove the device from the old runner without
+  // mirroring that remove into the runner it is about to join.
+  bool suppress_lobby_forwarding = false;
 };
 
 using devices_atom_queue = TSQueue<immer::box<events::PlugDeviceEvent>>;
@@ -155,6 +158,10 @@ struct VideoSettings {
   std::string runner_render_node;
   std::string video_producer_buffer_caps;
   bool hdr_output = false;
+  // Explicit SDR compatibility mode for older nested-compositor runtimes:
+  // advertise 8-bit client buffers and map SDR into the HDR transport.
+  // Patched native-HDR KWin must leave this disabled.
+  bool restrict_hdr_dmabufs = false;
 };
 
 struct AudioSettings {
@@ -435,6 +442,13 @@ struct StreamSession {
   // Moonlight sends hdrMode in /launch before RTSP ANNOUNCE. Keep it on the
   // session so the compositor can choose NV12/SDR or P010/HDR before the app starts.
   bool hdr_output_requested = false;
+
+  // The StreamSession itself can outlive its launcher runner (for example
+  // after Wolf UI has handed the client to a lobby).  Keep this state in a
+  // shared atom so copies used by the runner thread and by the HTTP resume
+  // endpoint agree about whether there is still an application producing
+  // frames for the compositor.
+  std::shared_ptr<std::atomic_bool> runner_active = std::make_shared<std::atomic_bool>(false);
 
   std::shared_ptr<EventBusType> event_bus;
   immer::box<wolf::config::ClientSettings> client_settings;

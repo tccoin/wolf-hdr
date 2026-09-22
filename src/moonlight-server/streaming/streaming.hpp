@@ -35,6 +35,7 @@ void start_video_producer(const std::string &session_id,
                           const std::string &render_node,
                           const wolf::core::virtual_display::DisplayMode &display_mode,
                           bool hdr_capable,
+                          bool restrict_hdr_dmabufs,
                           std::shared_ptr<immer::atom<gst_video_context::gst_context_ptr>> video_context,
                           std::shared_ptr<boost::promise<WaylandDisplayReady>> on_ready,
                           std::shared_ptr<events::EventBusType> event_bus);

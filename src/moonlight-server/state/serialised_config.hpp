@@ -112,6 +112,10 @@ struct AppDocker {
   std::vector<std::string> devices;
   std::vector<std::string> ports;
   std::optional<std::string> base_create_json;
+  // Most applications keep an isolated home directory per Moonlight session.
+  // Launchers such as Steam need a profile-scoped home instead so that login,
+  // library and controller state survive reconnects and alternate tiles.
+  std::optional<std::string> state_folder;
 };
 
 struct BaseAppVideoOverride {

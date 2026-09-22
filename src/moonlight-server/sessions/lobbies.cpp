@@ -13,11 +13,10 @@ namespace wolf::core::sessions {
 
 namespace {
 
-void schedule_single_player_cleanup(
-    const std::shared_ptr<events::EventBusType> &event_bus,
-    const std::shared_ptr<immer::atom<immer::vector<events::Lobby>>> &lobbies,
-    const std::chrono::seconds grace_period,
-    const events::Lobby &lobby) {
+void schedule_single_player_cleanup(const std::shared_ptr<events::EventBusType> &event_bus,
+                                    const std::shared_ptr<immer::atom<immer::vector<events::Lobby>>> &lobbies,
+                                    const std::chrono::seconds grace_period,
+                                    const events::Lobby &lobby) {
   const auto generation = lobby.empty_session_generation->fetch_add(1) + 1;
   const auto lobby_id = lobby.id;
   const auto empty_session_generation = lobby.empty_session_generation;
@@ -124,6 +123,18 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
         logs::log(logs::info, "[LOBBY] Creating new lobby");
         auto ev_bus = app_state->event_bus;
         const auto video_settings = lobby_settings->video_settings;
+        // Retain the SDR compatibility fallback for older KWin/plugin images.
+        // Native mode requires both the feedback-resource lifetime fix and
+        // KWin's PQ output patch. The old crash was in Wayland resource dispatch,
+        // not NVIDIA's 10-bit importer (verified with a faulting-thread trace).
+        const bool kde_compat_lobby = lobby_settings->name == "KDE Plasma HDR Experimental" &&
+                                      std::string(utils::get_env("WOLF_KDE_NATIVE_HDR", "0")) != "1";
+        const bool restrict_hdr_dmabufs = video_settings.restrict_hdr_dmabufs || kde_compat_lobby;
+        // The compatibility path maps 8-bit SDR to the same P010 transport.
+        const bool lobby_hdr_output = video_settings.hdr_output;
+        const std::string video_producer_buffer_caps =
+            kde_compat_lobby ? "video/x-raw(memory:CUDAMemory), format=P010_10LE, colorimetry=bt2100-pq"
+                             : video_settings.video_producer_buffer_caps;
 
         auto lobby = std::make_shared<events::Lobby>(
             events::Lobby{.id = lobby_settings->id,
@@ -143,21 +154,30 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
           std::shared_ptr<boost::promise<streaming::WaylandDisplayReady>> on_ready =
               std::make_shared<boost::promise<streaming::WaylandDisplayReady>>();
 
-          std::thread([lobby, video_settings, ev_bus, on_ready, gst_context = app_state->gst_context]() {
+          std::thread([lobby,
+                       video_settings,
+                       video_producer_buffer_caps,
+                       lobby_hdr_output,
+                       restrict_hdr_dmabufs,
+                       ev_bus,
+                       on_ready,
+                       gst_context = app_state->gst_context]() {
             streaming::start_video_producer(lobby->id,
-                                            video_settings.video_producer_buffer_caps,
+                                            video_producer_buffer_caps,
                                             video_settings.wayland_render_node,
                                             {.width = video_settings.width,
                                              .height = video_settings.height,
                                              .refreshRate = video_settings.refresh_rate},
-                                            video_settings.hdr_output,
+                                            lobby_hdr_output,
+                                            restrict_hdr_dmabufs,
                                             gst_context,
                                             on_ready,
                                             ev_bus);
           }).detach();
 
           auto w_display_ready = on_ready->get_future().then(
-              [lobby, runtime_dir, ev_bus, audio_server, lobby_settings, video_settings, host = app_state->host](auto fut) {
+              [lobby, runtime_dir, ev_bus, audio_server, lobby_settings, video_settings, host = app_state->host](
+                  auto fut) {
                 streaming::WaylandDisplayReady ready = fut.get();
 
                 auto wl_state =
@@ -281,21 +301,35 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
         // Switch over all joypads present in the session into the lobby
         events::JoypadList joypads = session->joypads->load();
         for (auto [_joypad_nr, joypad] : joypads) {
-          events::PlugDeviceEvent plug_ev{.session_id = std::to_string(session->session_id)};
+          // This hand-off used to emit a PlugDeviceEvent for the original
+          // session and then an UnplugDeviceEvent for that same session.  The
+          // lobby event handlers mirror *both* events to the lobby, which
+          // means an asynchronous fake-udev add can be followed by a delayed
+          // remove in the new runner.  A DualSense is a group of event/js/
+          // hidraw nodes, so that race leaves Steam and games with a partial
+          // controller (and can remove the mouse-like touchpad node too).
+          //
+          // Remove from the old runner only, then enqueue one complete add
+          // directly for the new lobby.  Future hot-plugs still use the
+          // normal event-bus forwarding path below.
+          events::PlugDeviceEvent plug_ev{.session_id = lobby->id};
           std::visit(
               [&plug_ev](auto &pad) {
                 plug_ev.udev_events = pad.get_udev_events();
                 plug_ev.udev_hw_db_entries = pad.get_udev_hw_db_entries();
               },
               *joypad);
-          app_state->event_bus->fire_event(immer::box<events::PlugDeviceEvent>(plug_ev));
+
           // Unplug it from the current session
           app_state->event_bus->fire_event(immer::box<events::UnplugDeviceEvent>{
               events::UnplugDeviceEvent{.session_id = std::to_string(session->session_id),
                                         .udev_events = plug_ev.udev_events,
-                                        .udev_hw_db_entries = plug_ev.udev_hw_db_entries}});
+                                        .udev_hw_db_entries = plug_ev.udev_hw_db_entries,
+                                        .suppress_lobby_forwarding = true}});
 
-          // Add it to the current lobby devices queue
+          // Add it to the current lobby devices queue with the lobby session
+          // id. Do not re-fire this through the bus: that would make the
+          // generic lobby forwarding handler enqueue a duplicate add.
           lobby->plugged_devices_queue->push(immer::box<events::PlugDeviceEvent>{plug_ev});
         }
         // TODO: hotplug pen_tablet
@@ -324,8 +358,8 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
             logs::log(logs::warning,
                       "[RECOVERY] Stopping failed lobby {} so its runner cannot keep an audio-only session alive",
                       failure->source_id);
-            app_state->event_bus->fire_event(immer::box<events::StopLobbyEvent>{
-                events::StopLobbyEvent{.lobby_id = failure->source_id}});
+            app_state->event_bus->fire_event(
+                immer::box<events::StopLobbyEvent>{events::StopLobbyEvent{.lobby_id = failure->source_id}});
             return;
           }
         }
@@ -415,6 +449,9 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
   // When a device is unplugged from a Moonlight session, we have to re-fire the event on our lobby
   handlers.push_back(app_state->event_bus->register_handler<immer::box<events::UnplugDeviceEvent>>(
       [=](const immer::box<events::UnplugDeviceEvent> &unplug_device_event) {
+        if (unplug_device_event->suppress_lobby_forwarding) {
+          return;
+        }
         immer::vector<events::Lobby> lobbies = app_state->lobbies->load();
         if (auto lobby = state::get_lobby_by_connected_session(lobbies, unplug_device_event->session_id)) {
           logs::log(logs::debug, "[LOBBY] Unplug device for session {}", unplug_device_event->session_id);

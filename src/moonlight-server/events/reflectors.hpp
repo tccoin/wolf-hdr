@@ -110,6 +110,9 @@ template <> struct Reflector<events::VideoSettings> {
     std::string runner_render_node;
     std::string video_producer_buffer_caps;
     bool hdr_output = false;
+    // Internal opt-in.  Keep it optional on the wire so existing Wolf UI
+    // versions that do not know this field can still create a lobby.
+    std::optional<bool> restrict_hdr_dmabufs;
   };
 
   static ReflType from(const events::VideoSettings &v) {
@@ -119,7 +122,8 @@ template <> struct Reflector<events::VideoSettings> {
             .wayland_render_node = v.wayland_render_node,
             .runner_render_node = v.runner_render_node,
             .video_producer_buffer_caps = v.video_producer_buffer_caps,
-            .hdr_output = v.hdr_output};
+            .hdr_output = v.hdr_output,
+            .restrict_hdr_dmabufs = v.restrict_hdr_dmabufs ? std::optional<bool>(true) : std::nullopt};
   }
 
   static events::VideoSettings to(const ReflType &v) {
@@ -129,7 +133,8 @@ template <> struct Reflector<events::VideoSettings> {
             .wayland_render_node = v.wayland_render_node,
             .runner_render_node = v.runner_render_node,
             .video_producer_buffer_caps = v.video_producer_buffer_caps,
-            .hdr_output = v.hdr_output};
+            .hdr_output = v.hdr_output,
+            .restrict_hdr_dmabufs = v.restrict_hdr_dmabufs.value_or(false)};
   }
 };
 

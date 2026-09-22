@@ -83,8 +83,15 @@ inline std::shared_ptr<events::StreamSession> create_stream_session(immer::box<s
                                                                     const std::string &aes_key,
                                                                     const std::string &aes_iv,
                                                                     bool hdr_output_requested = false) {
-  auto full_path = std::filesystem::path(state->host->local_base_state_folder) / current_client.app_state_folder /
-                   run_app.base.title;
+  std::filesystem::path state_folder = std::filesystem::path(current_client.app_state_folder) / run_app.base.title;
+  if (const auto runner = run_app.runner->serialize();
+      rfl::holds_alternative<wolf::config::AppDocker>(runner.variant())) {
+    const auto &docker_runner = rfl::get<wolf::config::AppDocker>(runner.variant());
+    if (docker_runner.state_folder && !docker_runner.state_folder->empty()) {
+      state_folder = *docker_runner.state_folder;
+    }
+  }
+  auto full_path = std::filesystem::path(state->host->local_base_state_folder) / state_folder;
   logs::log(logs::debug, "Host app state folder: {}, creating paths", full_path.string());
   std::filesystem::create_directories(full_path);
 
@@ -110,8 +117,7 @@ inline std::shared_ptr<events::StreamSession> create_stream_session(immer::box<s
       .client_settings = current_client.settings,
       .app = std::make_shared<events::App>(run_app),
       .app_local_state_folder = full_path.string(),
-      .app_host_state_folder = std::filesystem::path(state->host->host_base_state_folder) /
-                               current_client.app_state_folder / run_app.base.title,
+      .app_host_state_folder = std::filesystem::path(state->host->host_base_state_folder) / state_folder,
 
       .aes_key = aes_key,
       .aes_iv = aes_iv,
