@@ -111,6 +111,36 @@ home automatically. Two managed desktop icons select native windowed Steam or
 fullscreen HDR Big Picture. Steam account/game content must be downloaded or
 mounted separately. Do not copy another machine's profile over a live session.
 
+=== Heroic in KDE
+
+The image installs the checksum-pinned public Heroic 2.21.0 package, matching
+the existing standalone runner instead of migrating a shared profile with the
+base image's newer launcher. The desktop provides `Heroic 普通窗口` (native KDE)
+and `Heroic 全屏 · HDR` (Gamescope). Exit Heroic before switching modes.
+Neither icon launches a game automatically. Both use the system bubblewrap
+helper for Proton/UMU and do not add a global `--no-sandbox` bypass. Heroic
+2.21's upstream main window enables Node integration, so its main renderer is
+not fully sandboxed; do not confuse this with Chrome's separately verified
+namespace/seccomp sandbox. This integration does not patch Heroic's internals.
+
+On a new host no extra mount is required: Heroic creates its profile in the
+normal persisted KDE home. To reuse a standalone Heroic home, add a mount to
+the KDE app's `runner.mounts`, choosing the actual source on that host:
+
+[source,toml]
+....
+mounts = ['/path/to/heroic-home:/var/lib/wolf-shared-heroic:rw']
+....
+
+The launcher links only `.config/heroic`, `.config/legendary`,
+`.local/share/umu`, and `Games/Heroic` into the KDE home, preserving existing
+Proton paths. It does not replace KDE's entire `.config` or `.local`, copy
+credentials into an image, or overwrite conflicting local data. The source
+must be writable by the container's desktop UID. Do not open the old standalone
+tile and the KDE launcher against the same profile at the same time.
+Unknown old Electron singleton locks require an operator to verify that their
+owning container has stopped; the launcher never blindly deletes them.
+
 == Verification
 
 [source,bash]

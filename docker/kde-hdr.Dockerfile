@@ -88,10 +88,27 @@ COPY docker/restore-chrome-sandbox.py /usr/local/share/wolf/restore-chrome-sandb
 RUN python3 /usr/local/share/wolf/restore-chrome-sandbox.py \
  && chown -R root:root /opt/google/chrome \
  && chmod 4755 /opt/google/chrome/chrome-sandbox
+# Match the existing Heroic runner: sharing profiles with a newer launcher
+# could migrate its settings behind the old runner's back. Pin the public deb.
+ARG HEROIC_VERSION=2.21.0
+ARG HEROIC_SHA256=dd862805f2e5b13efdf1c689d003bc22a5c5f9149a893a187fe18020d67e8e66
+RUN curl -fL --retry 3 -o /tmp/heroic.deb \
+      https://github.com/Heroic-Games-Launcher/HeroicGamesLauncher/releases/download/v${HEROIC_VERSION}/Heroic-${HEROIC_VERSION}-linux-amd64.deb \
+ && echo "${HEROIC_SHA256}  /tmp/heroic.deb" | sha256sum -c - \
+ && apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-downgrades /tmp/heroic.deb \
+ && rm /tmp/heroic.deb \
+ && rm -rf /var/lib/apt/lists/* \
+ && chown -R root:root /opt/Heroic \
+ && chmod 4755 /opt/Heroic/chrome-sandbox
+COPY --chmod=0755 docker/wolf-kde-heroic.sh /usr/local/bin/heroic
+COPY docker/heroic-profile-init.py /usr/local/share/wolf/heroic-profile-init.py
+COPY docker/kde/heroic.desktop /usr/share/applications/heroic.desktop
 COPY --chmod=0755 docker/wolf-selkies-kwin-entrypoint.sh /usr/local/bin/wolf-selkies-kwin-entrypoint
 COPY --chmod=0755 docker/wolf-kde-steam.sh /usr/bin/steam
 COPY --chmod=0755 docker/steam-profile-init.sh /usr/local/bin/wolf-steam-profile-init
 COPY --chmod=0755 docker/steamos-session-select /usr/bin/steamos-session-select
 COPY docker/kde-raise-steam.js docker/steam-running-games.py docker/kde/steam.desktop docker/kde/steam-big-picture.desktop /usr/local/share/wolf/
+COPY docker/kde/heroic.desktop docker/kde/heroic-hdr.desktop /usr/local/share/wolf/
 USER ubuntu
 CMD ["/usr/local/bin/wolf-selkies-kwin-entrypoint"]

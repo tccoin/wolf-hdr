@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Heroic 普通窗口
+Comment=在 KDE 中打开 Heroic，保留已有账号和游戏库
+Exec=/usr/local/bin/heroic %U
+Icon=heroic
+Terminal=false
+Categories=Game;
+MimeType=x-scheme-handler/heroic;
+Actions=HDR;
+
+[Desktop Action HDR]
+Name=Heroic 全屏 · HDR
+Exec=/usr/local/bin/heroic --wolf-hdr

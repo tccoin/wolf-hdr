@@ -120,6 +120,8 @@ hostname > "$owner_file"
 mkdir -p "$HOME/Desktop"
 install -m 0755 /usr/local/share/wolf/steam.desktop "$HOME/Desktop/steam.desktop"
 install -m 0755 /usr/local/share/wolf/steam-big-picture.desktop "$HOME/Desktop/steam-big-picture.desktop"
+install -m 0755 /usr/local/share/wolf/heroic.desktop "$HOME/Desktop/heroic.desktop"
+install -m 0755 /usr/local/share/wolf/heroic-hdr.desktop "$HOME/Desktop/heroic-hdr.desktop"
 
 # Wolf removes one-shot runner containers after an early exit.  Keep the
 # compositor and Plasma startup trace in the existing runner-state mount so a
