@@ -115,8 +115,8 @@ mounted separately. Do not copy another machine's profile over a live session.
 
 The image installs the checksum-pinned public Heroic 2.21.0 package, matching
 the existing standalone runner instead of migrating a shared profile with the
-base image's newer launcher. The desktop provides `Heroic 普通窗口` (native KDE)
-and `Heroic 全屏 · HDR` (Gamescope). Exit Heroic before switching modes.
+base image's newer launcher. The desktop provides `Heroic Games Launcher` (native KDE)
+and `Heroic Fullscreen (HDR)` (Gamescope). Exit Heroic before switching modes.
 Neither icon launches a game automatically. Both use the system bubblewrap
 helper for Proton/UMU and do not add a global `--no-sandbox` bypass. Heroic
 2.21's upstream main window enables Node integration, so its main renderer is
@@ -138,6 +138,17 @@ Proton paths. It does not replace KDE's entire `.config` or `.local`, copy
 credentials into an image, or overwrite conflicting local data. The source
 must be writable by the container's desktop UID. Do not open the old standalone
 tile and the KDE launcher against the same profile at the same time.
+The launcher also exposes this selected shared directory inside Proton's
+pressure-vessel runtime, so symlinked UMU helpers, prefixes and games stay
+reachable. Like the Steam wrapper, it clears the base appliance's obsolete
+`DBUS_SYSTEM_BUS_ADDRESS` while retaining the real KDE session bus. Otherwise
+UMU fails before Wine starts, and Heroic's fake Epic launcher preparation can
+report a misleading empty-destination copy error.
+For a non-game preflight, run `tests/platforms/linux/check-heroic-proton.py`
+inside the KDE container as the desktop user, passing Heroic's main-process
+PID. It checks the launcher's actual environment and runs only `winepath` in
+each configured Proton prefix. This can initialize normal Wine metadata, but
+does not launch a game, alter game settings, or modify saves.
 Unknown old Electron singleton locks require an operator to verify that their
 owning container has stopped; the launcher never blindly deletes them.
 
