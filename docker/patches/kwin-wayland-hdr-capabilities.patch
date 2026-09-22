@@ -1,0 +1,66 @@
+From: Wolf HDR integration <noreply@localhost>
+Subject: [PATCH] wayland: expose HDR capabilities negotiated with parent
+
+The nested Wayland backend receives an image-description feedback object from
+its parent compositor.  In Wolf HDR sessions that feedback advertises both
+BT.2020 and ST.2084/PQ, but KWin 6.6 still only reports DPMS/tearing
+capabilities to KScreen.  Consequently Plasma hides the HDR and Wide Color
+Gamut controls even though KWin can create and attach HDR image descriptions
+to the parent surface.
+
+Advertise those capabilities only when the parent color-management protocol
+explicitly supports the required BT.2020/PQ primitives.  Also retain the
+desktop's requested HDR/WCG state in the Wayland output, matching the DRM
+backend's configuration semantics.  This does not invent a display mode: the
+parent compositor remains the authority for the negotiated color description.
+
+---
+ src/backends/wayland/wayland_output.cpp | 21 +++++++++++++++++++++
+ 1 file changed, 21 insertions(+)
+
+diff --git a/src/backends/wayland/wayland_output.cpp b/src/backends/wayland/wayland_output.cpp
+index 1a5a15ea9..f1c5b1b8e 100644
+--- a/src/backends/wayland/wayland_output.cpp
++++ b/src/backends/wayland/wayland_output.cpp
+@@ -128,4 +128,11 @@ WaylandOutput::WaylandOutput(const QString &name, WaylandBackend *backend)
+     , m_backend(backend)
+     , m_cursor(std::make_unique<WaylandCursor>(backend))
+ {
++    const int initialRefreshHz = qEnvironmentVariableIntValue("KWIN_WAYLAND_REFRESH");
++    if (initialRefreshHz > 0 && initialRefreshHz <= 1000) {
++        // A nested parent may not implement presentation-time feedback.  In
++        // that case use the stream rate supplied by the embedding session
++        // instead of silently exposing KWin's 60Hz fallback mode.
++        m_refreshRate = initialRefreshHz * 1000;
++    }
+     m_renderLoop->setMaxPendingFrameCount(2);
+@@ -140,6 +147,14 @@ WaylandOutput::WaylandOutput(const QString &name, WaylandBackend *backend)
+             && manager->supportsFeature(WP_COLOR_MANAGER_V1_FEATURE_SET_LUMINANCES)
+             && manager->supportsTransferFunction(WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_GAMMA22);
+         if (supportsMinFeatures) {
++            const bool supportsHdrOutput = manager->supportsPrimaries(WP_COLOR_MANAGER_V1_PRIMARIES_BT2020)
++                && manager->supportsTransferFunction(WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_ST2084_PQ);
++            if (supportsHdrOutput) {
++                // A nested output has no EDID/DRM connector to inspect.  The
++                // parent color-management protocol is its authoritative HDR
++                // capability source instead.
++                caps |= Capability::WideColorGamut | Capability::HighDynamicRange;
++            }
+             m_colorSurfaceFeedback = std::make_unique<ColorSurfaceFeedback>(wp_color_manager_v1_get_surface_feedback(manager->object(), *m_surface));
+             connect(m_colorSurfaceFeedback.get(), &ColorSurfaceFeedback::preferredColorChanged, this, &WaylandOutput::updateColor);
+         }
+@@ -381,6 +396,12 @@ void WaylandOutput::applyChanges(const OutputConfiguration &config)
+     next.desiredModeSize = props->desiredModeSize.value_or(m_state.desiredModeSize);
+     next.desiredModeRefreshRate = props->desiredModeRefreshRate.value_or(m_state.desiredModeRefreshRate);
+     next.desiredModeFlags = props->desiredModeFlags.value_or(m_state.desiredModeFlags);
++    if (capabilities() & Capability::HighDynamicRange) {
++        next.highDynamicRange = props->highDynamicRange.value_or(m_state.highDynamicRange);
++    }
++    if (capabilities() & Capability::WideColorGamut) {
++        next.wideColorGamut = props->wideColorGamut.value_or(m_state.wideColorGamut);
++    }
+     next.uuid = props->uuid.value_or(m_state.uuid);
+     next.replicationSource = props->replicationSource.value_or(m_state.replicationSource);
+     next.dpmsMode = props->dpmsMode.value_or(m_state.dpmsMode);
+-- 
+2.51.0

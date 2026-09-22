@@ -1,0 +1,50 @@
+diff --git a/src/Backends/WaylandBackend.cpp b/src/Backends/WaylandBackend.cpp
+--- a/src/Backends/WaylandBackend.cpp
++++ b/src/Backends/WaylandBackend.cpp
+@@ -3123,7 +3123,7 @@
+         double flY = ( wl_fixed_to_double( fSurfaceY ) * uScale / 120.0 + oState->nDestY ) / g_nOutputHeight;
+ 
+         wlserver_lock();
+-        wlserver_touchmotion( flX, flY, 0, ++m_uFakeTimestamp );
++        wlserver_mousemotion_absolute( flX, flY, ++m_uFakeTimestamp );
+         wlserver_unlock();
+     }
+     void CWaylandInputThread::Wayland_Pointer_Button( wl_pointer *pPointer, uint32_t uSerial, uint32_t uTime, uint32_t uButton, uint32_t uState )
+diff --git a/src/wlserver.hpp b/src/wlserver.hpp
+--- a/src/wlserver.hpp
++++ b/src/wlserver.hpp
+@@ -271,5 +271,6 @@
+ void wlserver_notify_dropdown( struct wlr_surface *wlrsurface, int nX, int nY );
+ void wlserver_mousemotion( double x, double y, uint32_t time );
++void wlserver_mousemotion_absolute( double x, double y, uint32_t time );
+ void wlserver_mousehide();
+ void wlserver_mousewarp( double x, double y, uint32_t time, bool bSynthetic );
+ void wlserver_mousebutton( int button, bool press, uint32_t time );
+diff --git a/src/wlserver.cpp b/src/wlserver.cpp
+--- a/src/wlserver.cpp
++++ b/src/wlserver.cpp
+@@ -3113,6 +3113,24 @@
+ 	wlr_seat_pointer_notify_frame( wlserver.wlr.seat );
+ }
+ 
++void wlserver_mousemotion_absolute( double x, double y, uint32_t time )
++{
++	assert( wlserver_is_lock_held() );
++
++	// Nested wl_pointer motion is a mouse, not a touchscreen contact. Steam
++	// sets touch_click_mode=Passthrough in Gamepad UI; routing through
++	// wlserver_touchmotion then silently stops moving (and showing) the mouse.
++	// Keep the same output-to-focused-surface transform, independent of all
++	// touch modes, including Disabled. Relative game input is unchanged.
++	if ( wlserver.mouse_focus_surface )
++	{
++		double sx = ( x * g_nOutputWidth + focusedWindowOffsetX ) * focusedWindowScaleX;
++		double sy = ( y * g_nOutputHeight + focusedWindowOffsetY ) * focusedWindowScaleY;
++		wlserver_mousewarp( sx, sy, time, false );
++	}
++	bump_input_counter();
++}
++
+ void wlserver_fake_mouse_pos( double x, double y )
+ {
+ 	// Fake a pos for eg. hiding true cursor state from Steam.

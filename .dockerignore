@@ -21,6 +21,11 @@
 !docker/steam-hdr-startup.sh
 !docker/steam-adaptive-startup.sh
 !docker/steam-hdr-game-env.sh
+!docker/patches/gamescope-wsi-overlay-bootstrap.patch
+!docker
+!docker/**
+!scripts
+!scripts/**
 
 # The HDR refresh image is built from the vendored compositor plugin. Keep it
 # in the Docker context so local HDR/zero-copy changes cannot be silently
@@ -28,3 +33,9 @@
 !third_party
 !third_party/gst-wayland-display
 !third_party/gst-wayland-display/**
+
+# Never import workstation build artefacts or VCS metadata into a clean build.
+**/.git
+**/target
+**/build
+**/__pycache__

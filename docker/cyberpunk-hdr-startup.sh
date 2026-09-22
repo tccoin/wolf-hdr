@@ -25,19 +25,18 @@ export PROTON_ENABLE_HDR=1
 unset PROTON_ENABLE_WAYLAND
 export PROTON_ENABLE_NGX_UPDATER=1
 export VKD3D_DISABLE_EXTENSIONS=VK_KHR_present_wait
+# Give Steam Overlay one brief XWayland-composited bootstrap window before
+# the patched WSI layer promotes Cyberpunk's recreated swapchain to HDR.
+export GAMESCOPE_WSI_OVERLAY_BOOTSTRAP=1
 
-# Steam's implicit layer stack currently reaches Gamescope WSI's device hooks
-# but can skip its instance/surface hooks.  The latter are the hooks that turn
-# the game's Xwayland surface into a Gamescope-managed HDR swapchain.  Make
-# this layer explicit (without removing any of Steam's other layers) so the
-# complete WSI chain is present before Proton creates its Vulkan instance.
-export VK_INSTANCE_LAYERS="${VK_INSTANCE_LAYERS:+${VK_INSTANCE_LAYERS}:}VK_LAYER_FROG_gamescope_wsi_x86_64"
-
-# Keep Steam Overlay enabled so the tile's optional DualSense Create -> F12
-# shortcut reaches Steam's screenshot handler.  Gamescope WSI remains an
-# explicit application layer above, so it still owns HDR surface creation.
+# Steam sanitizes implicit-layer enable variables when it launches a title.
+# Explicitly make both layers part of the instance chain instead: the Overlay
+# must be closest to the game so it can draw its UI and receive F12, then it
+# forwards the surface to Gamescope WSI, which still owns HDR swapchain setup.
+# This is also more reliable than relying on Steam's per-process layer toggle.
 unset DISABLE_VK_LAYER_VALVE_steam_overlay_1
 export ENABLE_VK_LAYER_VALVE_steam_overlay_1=1
+export VK_INSTANCE_LAYERS="${VK_INSTANCE_LAYERS:+${VK_INSTANCE_LAYERS}:}VK_LAYER_VALVE_steam_overlay_64:VK_LAYER_FROG_gamescope_wsi_x86_64"
 # Fossilize sits above Gamescope WSI in Steam's implicit Vulkan stack and
 # prevents the WSI layer from seeing the game's surface creation.  It is only
 # the shader-cache capture layer; disabling it for this dedicated HDR tile
@@ -50,13 +49,14 @@ export DISABLE_VK_LAYER_VALVE_steam_fossilize_1=1
 # WSI to remain in the chain.
 export VK_LOADER_LAYERS_DISABLE="${VK_LOADER_LAYERS_DISABLE:+${VK_LOADER_LAYERS_DISABLE},}VK_LAYER_VALVE_steam_fossilize_64"
 
-# Keep Cyberpunk in front for this dedicated game-only session.  In particular,
-# do not let an early Xwayland connection failure terminate the watcher before
-# Wine creates the game window.
+# The Steam URI starts the game from a background client inside this nested
+# Gamescope session, so its usual desktop activation request does not reach
+# the new XWayland game window.  Focus that window exactly once when it first
+# appears.  A persistent focus loop breaks Steam Overlay because it steals
+# focus back immediately after Shift+Tab; this helper exits after the first
+# successful activation.
 (
-  for _ in $(seq 1 1800); do
-    # Xwayland is created asynchronously.  `xwininfo` therefore legitimately
-    # fails during startup; do not let that one failure kill the watchdog.
+  for _ in $(seq 1 240); do
     window_id=$( (DISPLAY=:0 xwininfo -root -tree 2>/dev/null || true) | awk '/Cyberpunk 2077/ { print $1; exit }')
     if [[ -n "${window_id}" ]]; then
       DISPLAY=:0 python3 - "${window_id}" <<'PY' || true
@@ -68,17 +68,14 @@ x11.XOpenDisplay.restype = c.c_void_p
 display = x11.XOpenDisplay(None)
 if display:
     window = c.c_ulong(int(sys.argv[1], 16))
-    focused = c.c_ulong()
-    revert_to = c.c_int()
-    x11.XGetInputFocus(display, c.byref(focused), c.byref(revert_to))
-    if focused.value != window.value:
-        x11.XMapRaised(display, window)
-        x11.XRaiseWindow(display, window)
-        x11.XSetInputFocus(display, window, 1, 0)
-        x11.XSync(display, False)
+    x11.XMapRaised(display, window)
+    x11.XRaiseWindow(display, window)
+    x11.XSetInputFocus(display, window, 1, 0)
+    x11.XSync(display, False)
 PY
+      exit 0
     fi
-    sleep 1
+    sleep 0.25
   done
 ) &
 

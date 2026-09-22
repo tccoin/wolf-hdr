@@ -1,0 +1,83 @@
+diff --git a/src/rendervulkan.hpp b/src/rendervulkan.hpp
+--- a/src/rendervulkan.hpp
++++ b/src/rendervulkan.hpp
+@@ -825,6 +825,22 @@ class CVulkanDevice
+ public:
+ 	bool BInit(VkInstance instance, VkSurfaceKHR surface);
+ 
++	// Join before Wayland/EGL teardown can unload driver compiler resources.
++	void drainForShutdown()
++	{
++		if (m_pipelineThread.joinable())
++		{
++			m_pipelineThread.request_stop();
++			m_pipelineThread.join();
++		}
++		if (m_bInitialized)
++		{
++			waitIdle();
++			m_pendingCmdBufs.clear();
++			m_unusedCmdBufs.clear();
++		}
++	}
++
+ 	VkSampler sampler(SamplerState key);
+ 	VkPipeline pipeline(ShaderType type, uint32_t layerCount = 1, uint32_t ycbcrMask = 0, uint32_t blur_layers = 0, uint32_t colorspace_mask = 0, uint32_t output_eotf = EOTF_Gamma22, bool itm_enable = false);
+ 	int32_t findMemoryType( VkMemoryPropertyFlags properties, uint32_t requiredTypeBits );
+diff --git a/src/steamcompmgr.cpp b/src/steamcompmgr.cpp
+--- a/src/steamcompmgr.cpp
++++ b/src/steamcompmgr.cpp
+@@ -7621,6 +7621,10 @@ steamcompmgr_exit(void)
+ {
+ 	g_ImageWaiter.Shutdown();
+ 
++	// Backend destruction unloads driver resources also used by the worker.
++	// Stop it here, not later in wlserver_run or static device destruction.
++	g_device.drainForShutdown();
++
+ 	// Clean up any commits.
+ 	{
+ 		gamescope_xwayland_server_t *server = NULL;
+@@ -7657,6 +7661,13 @@ steamcompmgr_exit(void)
+ 
+ 	g_VirtualConnectorFocuses.clear();
+ 
++	// Release global textures while Vulkan entry points are still valid,
++	// rather than from static destructors after driver unload at exit.
++	g_output = VulkanOutput_t{};
++	wlserver_lock();
++	s_BufferMemos.Clear();
++	wlserver_unlock();
++
+     gamescope::IBackend::Set( nullptr );
+ 
+     wlserver_lock();
+diff --git a/src/BufferMemo.h b/src/BufferMemo.h
+--- a/src/BufferMemo.h
++++ b/src/BufferMemo.h
+@@ -48,6 +48,8 @@ namespace gamescope
+         void MemoizeBuffer( wlr_buffer *pBuffer, OwningRc<CVulkanTexture> pTexture );
+         void UnmemoizeBuffer( wlr_buffer *pBuffer );
++        // Call with the Wayland lock held, after rendering has stopped.
++        void Clear();
+     private:
+         mutable std::mutex m_mutBufferMemos;
+         std::unordered_map<wlr_buffer *, CBufferMemo> m_BufferMemos;
+     };
+diff --git a/src/BufferMemo.cpp b/src/BufferMemo.cpp
+--- a/src/BufferMemo.cpp
++++ b/src/BufferMemo.cpp
+@@ -76,6 +76,13 @@ namespace gamescope
+         pMemo->Finalize();
+     }
+ 
++    void CBufferMemoizer::Clear()
++    {
++        assert( wlserver_is_lock_held() );
++        std::scoped_lock lock{ m_mutBufferMemos };
++        m_BufferMemos.clear();
++    }
++
+     void CBufferMemoizer::UnmemoizeBuffer( wlr_buffer *pBuffer )
+     {
+         memo_log.debugf( "Unmemoizing buffer: wlr_buffer %p", pBuffer );

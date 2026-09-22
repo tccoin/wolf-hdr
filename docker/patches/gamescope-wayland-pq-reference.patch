@@ -1,0 +1,25 @@
+diff --git a/src/Backends/WaylandBackend.cpp b/src/Backends/WaylandBackend.cpp
+--- a/src/Backends/WaylandBackend.cpp
++++ b/src/Backends/WaylandBackend.cpp
+@@ -1512,5 +1512,11 @@
+                         }
+                         wp_image_description_creator_params_v1_set_tf_named( pParams, WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_ST2084_PQ );
++                        // PQ encodes absolute nits. Match the compositor reference
++                        // white so its perceptual transform does not rescale HDR
++                        // by output-reference / implicit-203-nit-reference.
++                        wp_image_description_creator_params_v1_set_luminances( pParams,
++                            0, 10000, m_pConnector->m_uReferenceLuminance );
++
+                         if ( m_ColorState->pHDRMetadata )
+                         {
+                             const hdr_metadata_infoframe *pInfoframe = &m_ColorState->pHDRMetadata->View<hdr_output_metadata>().hdmi_metadata_type1;
+@@ -1891,4 +1897,9 @@
+     void CWaylandPlane::Wayland_WPImageDescriptionInfo_Luminances( wp_image_description_info_v1 *pImageDescInfo, uint32_t uMinLum, uint32_t uMaxLum, uint32_t uRefLum )
+     {
++        if ( m_pConnector->m_uReferenceLuminance != uRefLum )
++        {
++            m_ColorState.reset();
++            force_repaint();
++        }
+         m_pConnector->m_uReferenceLuminance = uRefLum;
+     }

@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Steam 普通窗口
+Comment=直接在 KDE 中打开 Steam；HDR 游戏请使用大屏幕入口
+Exec=/usr/bin/steam --wolf-desktop %U
+Icon=steam
+Terminal=false
+Categories=Game;
+Actions=BigPicture;
+
+[Desktop Action BigPicture]
+Name=Steam 大屏幕 · HDR
+Exec=/usr/bin/steam --wolf-big-picture

@@ -1,0 +1,55 @@
+diff --git a/src/backends/wayland/wayland_output.cpp b/src/backends/wayland/wayland_output.cpp
+--- a/src/backends/wayland/wayland_output.cpp
++++ b/src/backends/wayland/wayland_output.cpp
+@@ -210,6 +210,20 @@ void WaylandOutput::updateColor()
+ void WaylandOutput::updateColor()
+ {
+     const auto &preferred = m_colorSurfaceFeedback->preferredColor();
++    // There is no local EDID for a streamed output. Advertise the transport
++    // capabilities, with an optional client-calibrated peak supplied by Wolf.
++    Information info = m_information;
++    info.maxPeakBrightness = preferred->maxHdrLuminance();
++    info.maxAverageBrightness = preferred->maxAverageLuminance();
++    info.minBrightness = preferred->minLuminance();
++    const int peak = qEnvironmentVariableIntValue("KWIN_WAYLAND_HDR_PEAK_NITS");
++    if (peak >= 100 && peak <= 10000) {
++        info.maxPeakBrightness = peak;
++        info.maxAverageBrightness = std::min(info.maxAverageBrightness.value_or(peak), double(peak));
++    }
++    setInformation(info);
++    const double maxPeak = m_state.maxPeakBrightnessOverride.value_or(info.maxPeakBrightness.value_or(1000));
++    const double maxAverage = std::min(m_state.maxAverageBrightnessOverride.value_or(info.maxAverageBrightness.value_or(maxPeak)), maxPeak);
+     // A nested HDR output must preserve the parent's actual transfer function.
+     // Gamma 2.2 with a 10000-nit range is not PQ, even if HDR is exposed in
+     // KScreen. Wolf's HDR transport consumes the explicitly declared PQ image.
+@@ -221,9 +235,9 @@ void WaylandOutput::updateColor()
+         preferred->containerColorimetry(),
+         tf,
+         preferred->referenceLuminance(),
+-        preferred->minLuminance(),
+-        preferred->maxAverageLuminance(),
+-        preferred->maxHdrLuminance(),
++        next.minBrightnessOverride.value_or(preferred->minLuminance()),
++        maxAverage,
++        maxPeak,
+     });
+     next.originalColorDescription = next.colorDescription;
+     next.blendingColor = next.colorDescription;
+@@ -399,5 +413,8 @@ void WaylandOutput::applyChanges(const OutputConfiguration &config)
+     if (capabilities() & Capability::HighDynamicRange) {
+         next.highDynamicRange = props->highDynamicRange.value_or(m_state.highDynamicRange);
++        next.maxPeakBrightnessOverride = props->maxPeakBrightnessOverride.value_or(m_state.maxPeakBrightnessOverride);
++        next.maxAverageBrightnessOverride = props->maxAverageBrightnessOverride.value_or(m_state.maxAverageBrightnessOverride);
++        next.minBrightnessOverride = props->minBrightnessOverride.value_or(m_state.minBrightnessOverride);
+     }
+     if (capabilities() & Capability::WideColorGamut) {
+         next.wideColorGamut = props->wideColorGamut.value_or(m_state.wideColorGamut);
+@@ -416,5 +433,8 @@ void WaylandOutput::applyChanges(const OutputConfiguration &config)
+     next.priority = props->priority.value_or(m_state.priority);
+     setState(next);
++    if (m_colorSurfaceFeedback) {
++        updateColor();
++    }
+ }
+ 
+ bool WaylandOutput::isReady() const

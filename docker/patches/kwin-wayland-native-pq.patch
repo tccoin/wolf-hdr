@@ -1,0 +1,15 @@
+diff --git a/src/backends/wayland/wayland_output.cpp b/src/backends/wayland/wayland_output.cpp
+--- a/src/backends/wayland/wayland_output.cpp
++++ b/src/backends/wayland/wayland_output.cpp
+@@ -210,7 +210,10 @@
+ void WaylandOutput::updateColor()
+ {
+     const auto &preferred = m_colorSurfaceFeedback->preferredColor();
+-    const auto tf = TransferFunction(TransferFunction::gamma22, preferred->transferFunction().minLuminance, preferred->transferFunction().maxLuminance);
++    // A nested HDR output must preserve the parent's actual transfer function.
++    // Gamma 2.2 with a 10000-nit range is not PQ, even if HDR is exposed in
++    // KScreen. Wolf's HDR transport consumes the explicitly declared PQ image.
++    const auto tf = preferred->transferFunction();
+     State next = m_state;
+     next.colorDescription = std::make_shared<ColorDescription>(ColorDescription{
+         preferred->containerColorimetry(),

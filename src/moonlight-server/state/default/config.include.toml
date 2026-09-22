@@ -156,6 +156,40 @@ base_create_json = """
 """
 
 [[profiles.apps]]
+title = "KDE Plasma HDR"
+start_virtual_compositor = true
+support_hdr = true
+
+[profiles.apps.runner]
+type = "docker"
+name = "WolfSelkiesKWin"
+image = "wolf-kde:hdr"
+# The runner's home is persisted automatically by Wolf. No workstation path
+# or existing Steam installation is required; bootstrap is supplied by image.
+mounts = []
+devices = ["/dev/uinput:/dev/uinput:mrw"]
+ports = []
+env = [
+    "WOLF_KDE_ENABLE_HDR=1",
+    "WOLF_KDE_START_STEAM=1",
+    "WOLF_KDE_GAMESCOPE_HDR=1",
+    "WOLF_SDR_REFERENCE_WHITE=100",
+    "GOW_REQUIRED_DEVICES=/dev/input/* /dev/dri/* /dev/nvidia*",
+]
+base_create_json = '''{
+  "Cmd": ["/usr/local/bin/wolf-selkies-kwin-entrypoint"],
+  "User": "0",
+  "HostConfig": {
+    "IpcMode": "host",
+    "CapAdd": ["SYS_ADMIN", "SYS_NICE", "SYS_PTRACE", "NET_RAW", "MKNOD", "NET_ADMIN"],
+    "SecurityOpt": ["seccomp=unconfined", "apparmor=unconfined"],
+    "Ulimits": [{"Name":"nofile", "Hard":10240, "Soft":10240}],
+    "Privileged": false,
+    "DeviceCgroupRules": ["c 13:* rmw"]
+  }
+}'''
+
+[[profiles.apps]]
 title = "Pegasus"
 icon_png_path = "https://games-on-whales.github.io/wildlife/apps/pegasus/assets/icon.png"
 start_virtual_compositor = true
@@ -340,9 +374,8 @@ video/x-raw(memory:CUDAMemory), width={width}, height={height}, \
 chroma-site={color_range}, format=NV12, colorimetry={color_space}, pixel-aspect-ratio=1/1\
 """
 
-# The NVIDIA producer supplies already-converted NV12/P010 from the compositor's
-# Vulkan converter. Upload unchanged to CUDA for NVENC: HDR P010 pixels are native
-# PQ and must not be passed through a second RGB/PQ conversion.
+# The compositor renders directly into CUDA RGB. Convert to the client-selected
+# NV12 (SDR) or P010 (HDR) format on the GPU immediately before NVENC.
 video_params_zero_copy = """
 queue max-size-buffers=4 leaky=downstream !
 cudaupload !

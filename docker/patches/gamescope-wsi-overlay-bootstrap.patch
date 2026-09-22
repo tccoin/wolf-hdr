@@ -1,0 +1,31 @@
+diff --git a/layer/VkLayer_FROG_gamescope_wsi.cpp b/layer/VkLayer_FROG_gamescope_wsi.cpp
+index ee0b453..092dfdb 100644
+--- a/layer/VkLayer_FROG_gamescope_wsi.cpp
++++ b/layer/VkLayer_FROG_gamescope_wsi.cpp
+@@ -10,6 +10,7 @@
+ #include "../src/layer_defines.h"
+ 
+ #include <atomic>
++#include <chrono>
+ #include <cerrno>
+ #include <charconv>
+ #include <cstdio>
+@@ -587,6 +588,18 @@ namespace GamescopeWSILayer {
+       // but it seems what is exposed in xcb_composite is quite limited.
+       // So let's see how it goes for now. :-)
+       // Come back to this eventually.
++
++      // Let Steam Overlay discover this real XWayland window before bypassing
++      // it. The X11 metadata above must be collected first: QueuePresentKHR
++      // uses cachedWindowRect while the temporary composited swapchain runs.
++      static const auto overlayBootstrapDeadline =
++          std::chrono::steady_clock::now() + std::chrono::seconds(10);
++      const char *overlayBootstrap = getenv("GAMESCOPE_WSI_OVERLAY_BOOTSTRAP");
++      if (overlayBootstrap && strcmp(overlayBootstrap, "1") == 0 &&
++          std::chrono::steady_clock::now() < overlayBootstrapDeadline) {
++        return false;
++      }
++
+       return true;
+     }
+   };

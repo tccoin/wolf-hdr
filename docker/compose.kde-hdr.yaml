@@ -1,0 +1,26 @@
+# Example for a NEW host. Never mount over an existing live Wolf config blindly.
+# Set WOLF_RENDER_NODE to the NVIDIA KMS card and WOLF_ENCODER_NODE to its render node.
+services:
+  wolf:
+    image: ${WOLF_IMAGE:-wolf:nvcodec-hdr}
+    environment:
+      HOST_APPS_STATE_FOLDER: /etc/wolf
+      XDG_RUNTIME_DIR: /tmp/sockets
+      WOLF_RENDER_NODE: ${WOLF_RENDER_NODE:?Set the NVIDIA KMS card, e.g. /dev/dri/card1}
+      WOLF_ENCODER_NODE: ${WOLF_ENCODER_NODE:?Set the matching render node, e.g. /dev/dri/renderD128}
+      NVIDIA_DRIVER_CAPABILITIES: all
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
+      GBM_BACKEND: nvidia-drm
+      __GLX_VENDOR_LIBRARY_NAME: nvidia
+      WOLF_HDR_MASTERING: '35400:14600:8500:39850:6550:2300:15635:16450:10000000:1'
+      WOLF_HDR_CLL: '1000:400'
+    volumes:
+      - /etc/wolf:/etc/wolf
+      - /tmp/sockets:/tmp/sockets
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /dev:/dev
+      - /run/udev:/run/udev
+    runtime: nvidia
+    privileged: true
+    network_mode: host
+    restart: unless-stopped

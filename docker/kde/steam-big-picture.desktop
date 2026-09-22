@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Steam 大屏幕 · HDR
+Comment=通过全屏 Gamescope 启动 Steam 大屏幕，保留 HDR 游戏支持
+Exec=/usr/bin/steam --wolf-big-picture
+Icon=steam
+Terminal=false
+Categories=Game;

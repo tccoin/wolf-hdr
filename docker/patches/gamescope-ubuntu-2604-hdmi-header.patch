@@ -1,0 +1,22 @@
+diff --git a/src/hdmi.h b/src/hdmi.h
+--- a/src/hdmi.h
++++ b/src/hdmi.h
+@@ -8,7 +8,7 @@
+ #define HDMI_EOTF_ST2084 2
+ #define HDMI_EOTF_HLG 3
+ 
+-#if HAVE_DRM
++#if HAVE_DRM || defined(__linux__)
+ #include <drm_mode.h>
+ #else
+ /**
+diff --git a/src/wlserver.cpp b/src/wlserver.cpp
+--- a/src/wlserver.cpp
++++ b/src/wlserver.cpp
+@@ -10,5 +10,6 @@
+ #include <fcntl.h>
+ #include <xf86drm.h>
+ #include <sys/eventfd.h>
++#include <cfloat>
+ 
+ #include <linux/input-event-codes.h>

@@ -6,6 +6,8 @@ FROM ghcr.io/games-on-whales/steam:edge AS gamescope_wsi_builder
 
 ARG GAMESCOPE_REF=05949f8149bb5d16b006624d319a76e2433caf4c
 
+COPY docker/patches/gamescope-wsi-overlay-bootstrap.patch /tmp/gamescope-wsi-overlay-bootstrap.patch
+
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ca-certificates cmake g++ git libvulkan-dev libwayland-dev \
@@ -17,6 +19,7 @@ RUN apt-get update \
     && git fetch --depth=1 origin "${GAMESCOPE_REF}" \
     && git checkout --detach "${GAMESCOPE_REF}" \
     && git submodule update --init --depth=1 subprojects/vkroots \
+    && git apply /tmp/gamescope-wsi-overlay-bootstrap.patch \
     && meson setup /build/gamescope . \
         -Denable_gamescope=false \
         -Denable_gamescope_wsi_layer=true \

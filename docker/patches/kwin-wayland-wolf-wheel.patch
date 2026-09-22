@@ -1,0 +1,18 @@
+diff --git a/src/backends/wayland/wayland_backend.cpp b/src/backends/wayland/wayland_backend.cpp
+--- a/src/backends/wayland/wayland_backend.cpp
++++ b/src/backends/wayland/wayland_backend.cpp
+@@ -136,7 +136,13 @@
+         default:
+             Q_UNREACHABLE();
+         }
+-        Q_EMIT pointerAxisChanged(axis, delta, 0, PointerAxisSource::Unknown, false, std::chrono::milliseconds(time), this);
++        // KWayland's Pointer exposes axisChanged but loses axis_value120 and
++        // source. A known parent (Wolf: 3 surface units / wheel detent) may
++        // supply its unit conversion; generic nested compositors stay unchanged.
++        const int v120PerUnit = qEnvironmentVariableIntValue("KWIN_WAYLAND_SCROLL_V120_PER_UNIT");
++        const int delta120 = v120PerUnit > 0 ? qRound(delta * v120PerUnit) : 0;
++        const auto source = v120PerUnit > 0 ? PointerAxisSource::Wheel : PointerAxisSource::Unknown;
++        Q_EMIT pointerAxisChanged(axis, delta, delta120, source, false, std::chrono::milliseconds(time), this);
+     });
+ 
+     connect(pointer, &Pointer::frame, this, [this]() {
