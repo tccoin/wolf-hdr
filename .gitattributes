@@ -1,0 +1,3 @@
+# Unified diffs deliberately prefix context (including tabs/blank lines) with
+# one space. Do not mistake patch syntax for source-file whitespace errors.
+*.patch -whitespace

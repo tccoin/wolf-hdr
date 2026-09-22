@@ -1,5 +1,23 @@
 = Wolf helper scripts
 
+== build-hdr-nvcodec.sh
+
+Build the NVIDIA HDR Wolf server and KDE HDR application image from this
+repository and public dependencies. No saved local base image or neighbouring
+checkout is required. See `docs/modules/dev/pages/kde-hdr-build.adoc` for the
+build graph, isolated-builder verification and new-host configuration.
+
+[source,bash]
+....
+bash scripts/build-hdr-nvcodec.sh
+# Optional NVIDIA runtime smoke check (does not launch a game):
+bash scripts/verify-hdr-image.sh wolf:nvcodec-hdr
+....
+
+`install-cyberpunk-no-intro.py` installs the optional checksum-pinned redscript
+mod and dependency into an explicitly supplied game directory. Close the game
+first. It preserves saves and refuses to overwrite a different mod version.
+
 == wolf-input-diag.sh
 
 Host-side diagnostic that validates controller/input passthrough for Wolf. It

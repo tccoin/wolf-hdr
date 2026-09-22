@@ -1,0 +1,156 @@
+= Build Wolf and KDE HDR on a new machine
+:toc:
+
+This is the source-build entry point for the NVIDIA native-PQ streaming stack.
+It needs only this repository, Docker with Buildx, and internet access to the
+public registries/source repositories. It does *not* need another checkout,
+an exported Docker archive, pre-existing `local/*` images, or personal profiles.
+The current target is Linux x86-64; building does not require a GPU.
+
+== Build
+
+[source,bash]
+....
+git clone https://github.com/tccoin/wolf-hdr.git
+cd wolf-hdr
+bash scripts/build-hdr-nvcodec.sh
+....
+
+The changes on this page must be committed/pushed to the checkout you clone;
+an older remote revision does not include uncommitted working-tree changes.
+The outputs are `wolf:nvcodec-hdr` and `wolf-kde:hdr`. Output tags can be changed
+with `WOLF_OUTPUT_IMAGE` and `WOLF_KDE_IMAGE`; changing the KDE tag also requires
+updating the app's `runner.image` in the Wolf config. Use `BUILD_JOBS` to control
+compiler parallelism (default 4). Docker reuses ordinary build-layer caches.
+Building never restarts the running server unless `--deploy` is explicitly used
+with `WOLF_COMPOSE_FILE` pointing at the intended Compose file.
+
+To check that a build does not depend on a workstation's Docker image store:
+
+[source,bash]
+....
+docker buildx create --name wolf-clean --driver docker-container
+WOLF_BUILDER=wolf-clean bash scripts/build-hdr-nvcodec.sh
+....
+
+The dedicated builder starts with its own empty cache and pulls only public
+base images. Do not import the old recovery archive or a cache to this builder
+when performing this check. `--no-cache` can force recompilation on later runs.
+
+== Source layout and dependency versions
+
+* `docker/wolf.nvcodec-runtime.Dockerfile`: complete public-source build of
+  GStreamer 1.28.4, gst-interpipe, the vendored Wayland compositor, Wolf and
+  fake-udev; then assembly of an ABI-matched NVENC/CUDA/GL runtime.
+* `docker/kde-hdr.Dockerfile`: public Selkies base, distro KWin source
+  `4:6.6.6-0ubuntu0.1`, and Gamescope commit
+  `05949f8149bb5d16b006624d319a76e2433caf4c`.
+* `docker/patches/`: KWin HDR/PQ, calibration, explicit Gamescope color metadata
+  and wheel patches; Gamescope pointer/remap/PQ/WSI and shader-worker shutdown
+  patches. `docker/nvcodec-rgb10-hdr-vui.patch` fixes HDR
+  signaling in the encoder. Patch failures stop the build.
+* `src/`: Wolf server/controller/lifecycle fixes in their original modules.
+* `third_party/gst-wayland-display/`: compositor fixes and a version-controlled
+  `Cargo.lock`. The build uses `cargo --locked`; it must not silently refresh
+  dependencies or use source files from a cached image.
+* `docker/wolf-kde-steam.sh`, `docker/steamos-session-select`, and
+  `docker/wolf-selkies-kwin-entrypoint.sh`: normal Steam / HDR Big Picture,
+  Overlay workaround, SDL mapping, desktop return, and desktop shortcuts.
+* `docker/restore-chrome-sandbox.py`: remove the appliance's sandbox bypass.
+  Chrome's saved-password backend remains unchanged.
+  The KDE entrypoint exclusively locks the persistent home and archives stale
+  Chrome singleton links only when they belong to its recorded previous
+  container. Unknown profile owners are not bypassed.
+* `docker/steam-profile-init.sh`: initialise an empty Steam profile using the
+  bootstrap shipped by the public base image; never replace an existing one.
+* `tests/platforms/linux/check-*.py`: live Chrome, controller, window and PQ
+  checks. `scripts/install-cyberpunk-no-intro.py` installs the optional pinned
+  mod/dependency separately, not into the container image or a game save.
+
+Public base image digests and source refs are specified directly in the
+Dockerfiles. OS security packages and Steam updates still come from upstream
+repositories: this provides an independently buildable source graph, not a
+promise that every future build is byte-identical. Keep distro source versions
+and public base digests compatible when updating them.
+
+== New-host setup
+
+Install the NVIDIA driver and NVIDIA Container Toolkit. Find the actual KMS
+card and matching render node on the new host; numbers are not portable.
+The example deliberately requires you to supply these instead of embedding
+the original workstation's device selection.
+
+[source,bash]
+....
+export WOLF_RENDER_NODE=/dev/dri/card1       # example: choose your actual card
+export WOLF_ENCODER_NODE=/dev/dri/renderD128 # example: matching render node
+docker compose -f docker/compose.kde-hdr.yaml up -d
+....
+
+The example uses the standard `/etc/wolf` persistent state and `/tmp/sockets`
+paths. It has no username-specific path, shared Steam library requirement,
+saved account, certificate or pairing secret. On the first start Wolf generates
+its default config, which now includes the `KDE Plasma HDR` app. Existing config
+files are *not* overwritten; add the app block from
+`src/moonlight-server/state/default/config.include.toml` manually when upgrading.
+If app rendering and encoding use different devices, set the KDE app's
+`render_node` to the appropriate render node in that host's config.
+
+Enable HDR in Moonlight and use the KDE HDR app. The default monitor peak is
+derived from parent feedback, not hard-coded to one display. Set
+`WOLF_KDE_HDR_PEAK_NITS` in the app environment or configure KDE's peak luminance
+for the actual client display (for example, 550 nits).
+SDR reference white is 100 nits. Transport HDR metadata stays fixed across app
+switches to avoid an encoder renegotiation/flash.
+KWin preserves Gamescope's explicit reference-white/mastering information;
+its legacy `Windows_HDR` preset must not override those protocol values.
+That override otherwise scales a 100-nit reference by approximately 100/203.
+
+The KDE image runs applications as `ubuntu` in `/home/retro`; Wolf persists that
+home automatically. Two managed desktop icons select native windowed Steam or
+fullscreen HDR Big Picture. Steam account/game content must be downloaded or
+mounted separately. Do not copy another machine's profile over a live session.
+
+== Verification
+
+[source,bash]
+....
+# Requires NVIDIA Container Toolkit; does not touch profiles or launch games.
+bash scripts/verify-hdr-image.sh wolf:nvcodec-hdr
+
+# Full isolated test: fresh KDE home, no Steam/game/profile mounts.
+# Optional WOLF_BUILDER selects the same Buildx cache used for the images.
+WOLF_TEST_RENDER_NODE=/dev/dri/renderD128 bash scripts/verify-kde-hdr-stack.sh
+....
+
+This checks plugin availability and GL RGB10 -> CUDA P010 -> HEVC Main-10 encode.
+The full-stack test additionally builds the PQ client from public protocol
+sources, starts two temporary containers, checks Chrome's sandbox, tests direct
+KWin and nested Gamescope PQ separately using 10-bit source patches, requires
+a clean Gamescope exit, and verifies the encoded HEVC VUI.
+`BUILD_JOBS` also applies to the test-client build. `WOLF_TEST_GDB=1` collects
+exit backtraces for debugging, but preserves a failing child exit status.
+It removes its own containers and retains logs/captures under a printed private
+`/tmp/wolf-hdr-regression.*` directory (several GB of raw frames).
+After opening KDE, run `tests/platforms/linux/check-chrome-sandbox.py` inside its
+container as `ubuntu`; it uses a disposable browser profile. It must report
+namespace and Seccomp-BPF protection, not merely hide the Chrome warning.
+
+For native HDR, check the actual pipeline and surface metadata as described in
+xref:dev:hdr-test-matrix.adoc[]. The PQ patch generator/capture analyser can
+check the numerical signal. Only the user can confirm physical display color
+and Steam/game interaction. No automated test should open a game/save or change
+its brightness settings. The nested KDE Mouse hardware module remains outside
+scope; the wheel patch handles streamed input without host mouse passthrough.
+
+=== Validated signal (2026-09-22)
+
+The public-source Wolf/KDE images passed the isolated test on the NVIDIA host:
+both direct KWin and X11/WSI Gamescope -> KWin produced the same sampled PQ
+levels. Nominal 100 / 203 / 300 / 400 / 550 nit patches measured approximately
+100.23 / 202.92 / 299.54 / 401.51 / 551.61 nits in the captured RGB10 stream,
+consistent with 10-bit PQ quantization. Gamescope exited with status 0.
+The encoded stream reported Main 10, yuv420p10le, BT.2020 non-constant-luminance,
+SMPTE ST 2084 and BT.2020 primaries. Chrome's namespace and seccomp sandbox
+checks passed. These are signal/software checks, not a measurement of the
+client monitor's physical luminance or a substitute for Steam/game testing.

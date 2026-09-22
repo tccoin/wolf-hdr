@@ -7,22 +7,26 @@ rerun after the stated variable has changed and the GPU context has been recover
 
 == Current state
 
-The restored runtime is `local/wolf:hdr-native-gl-pq`.  It contains one ABI-matched GStreamer
-1.28 NVENC/CUDA/GL stack plus NVRTC.  Do not rebuild the deployed runtime from the smaller
-`hdr-nvcodec` base: that base lacks the CUDA component needed by the native HDR candidates.
+The source-build runtime is `wolf:nvcodec-hdr`, with `wolf-kde:hdr` for the nested
+desktop. Build both using xref:dev:kde-hdr-build.adoc[]. They contain one
+ABI-matched GStreamer 1.28 NVENC/CUDA/GL stack plus NVRTC and do not require
+previous workstation images. The E1–E12 rows below are historical experiments,
+not instructions to restore obsolete local image tags.
 
-The live HDR video pipeline observed in Wolf logs is:
+The current HDR producer normalizes its native PQ GL texture to CUDA P010
+before the interpipe boundary. The encoder consumes that already-converted
+stream without a second RGB-to-P010 conversion:
 
 [source]
 ....
-interpipesrc ! video/x-raw(memory:GLMemory),format=RGB10A2_LE,
-wolf-hdr-pq=true ! nvh265enc ! h265parse !
-video/x-h265,profile=main-10
+GLMemory/RGB10A2_LE (PQ) -> cudaupload -> CUDAMemory/RGB10A2_LE
+  -> cudaconvertscale -> CUDAMemory/P010_10LE (bt2100-pq) -> interpipesink
+interpipesrc -> nvh265enc -> h265parse -> video/x-h265,profile=main-10
 ....
 
-This is the path on which Cyberpunk HDR was physically verified as correct.  Although the image
-also exposes `cudaconvertscale`, the live native GL pipeline above does *not* insert that element.
-Do not infer the active conversion path merely from `gst-inspect-1.0` output.
+The isolated source-build test checks direct and Gamescope/KWin PQ numerically
+and inspects encoded HDR10 signaling. Physical display/game validation remains
+separate. Do not infer the active path merely from `gst-inspect-1.0` output.
 
 The game library remains in `/etc/wolf/profile-data/user/WolfSteam`; no test may initialise,
 delete, or replace that folder.
@@ -55,7 +59,7 @@ docker logs wayland_streaming-wolf-1 2>&1 | \
 
 . If the pipeline instead contains `vulkandownload ! video/x-raw ! cudaupload`, stop: that is
   the known CPU P010 fallback (E1) and is expected to run at roughly 10 FPS at ultrawide. Restore
-  `hdr-native-gl-pq`; do not tune bit rate, metadata, or Moonlight flags to compensate.
+  the validated source-built image; do not tune bit rate, metadata, or Moonlight flags to compensate.
 
 . If `cudaconvertscale` is missing, do not switch to the CPU P010 fallback. Restore the
   ABI-matched runtime image (or rebuild it using `docker/wolf.nvcodec-runtime.Dockerfile`) and
@@ -125,7 +129,7 @@ docker logs wayland_streaming-wolf-1 2>&1 | \
 |E12
 |Native GLMemory `RGB10A2_LE` -> NVENC Main-10 (`hdr-native-gl-pq`)
 |The ABI-matched GStreamer GL/CUDA/NVENC runtime and NVRTC were restored. Wolf logs show the native `GLMemory`, `RGB10A2_LE`, `wolf-hdr-pq=true` producer directly feeding `nvh265enc`; Cyberpunk HDR was physically verified with correct colour.
-|Current deployment baseline. Preserve this image and verify the actual log pipeline after any rebuild or configuration change.
+|Historical deployment baseline. See the source-build verification for the current explicit GL-to-CUDA/P010 route.
 |===
 
 == Remaining tests, in order

@@ -19,6 +19,7 @@
 ** xref:dev:code-structure.adoc[]
 ** xref:dev:gstreamer.adoc[]
 ** xref:dev:hdr-test-matrix.adoc[HDR runtime runbook]
+** xref:dev:kde-hdr-build.adoc[Build KDE HDR from source]
 ** xref:dev:wayland.adoc[]
 ** xref:dev:fake-udev.adoc[]
 
