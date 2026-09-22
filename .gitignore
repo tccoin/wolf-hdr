@@ -18,6 +18,22 @@ DartConfiguration.tcl
 .run/
 target
 Cargo.lock
+!third_party/gst-wayland-display/Cargo.lock
 build/
 .clj-kondo
 .lsp
+
+# Deployment state and credentials are runtime inputs, never source assets.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.log
+__pycache__/
+wolf-hdr-config.toml
+profile-data/
+heroic-data/
+*recovery*.tar*

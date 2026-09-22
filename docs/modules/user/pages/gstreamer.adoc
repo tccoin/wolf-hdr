@@ -51,7 +51,7 @@ title = "Music"
 # try also: spacescope style=color-lines
 [apps.video]
 source = """
-filesrc location=/Users/ale/Downloads/elevate.mp3 !
+filesrc location=/path/to/audio.mp3 !
 tee name=t
 ! queue ! shmsink socket-path=/tmp/pipe.sock shm-size=10000000
 t. ! decodebin ! audioconvert ! wavescope style=color-lines
