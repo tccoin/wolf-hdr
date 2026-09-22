@@ -38,7 +38,7 @@ notify_error() {
 # Serialize mode transitions, separately from the lifetime/startup lock.
 exec 8>"${XDG_RUNTIME_DIR:?}/wolf-kde-steam-transition.lock"
 if ! flock -w 45 8; then
-  notify_error "Steam 正在切换模式，请稍后再试。"
+  notify_error "Steam is switching modes. Please try again shortly."
   exit 1
 fi
 # v2 also migrates away from the old inode inherited by external browsers.
@@ -70,11 +70,11 @@ if [ -n "$pid" ]; then
     # Steam shares one profile/IPC endpoint. Switching display servers needs
     # a graceful restart, never a second concurrent client or a forced kill.
     if ! games=$(python3 /usr/local/share/wolf/steam-running-games.py "$pid"); then
-      notify_error "无法确认游戏运行状态；请先手动退出 Steam，再选择所需入口。"
+      notify_error "Could not verify whether a game is running. Exit Steam manually before switching modes."
       exit 1
     fi
     if [ -n "$games" ]; then
-      notify_error "检测到游戏仍在运行（App ID: $games）。请先退出游戏，再切换 Steam 模式。"
+      notify_error "A game is still running (App ID: $games). Exit the game before switching Steam modes."
       exit 1
     fi
     echo "[wolf-kde-steam] switching $current_mode -> $requested_mode"
@@ -84,7 +84,7 @@ if [ -n "$pid" ]; then
       sleep .1
     done
     if [ -d "/proc/$pid" ]; then
-      notify_error "Steam 尚未退出（可能正在同步或等待确认）。请在 Steam 中退出后重试；没有强制终止进程。"
+      notify_error "Steam is still running, possibly syncing or awaiting confirmation. Exit Steam and retry; no process was forcibly stopped."
       exit 1
     fi
     pid=""
@@ -119,7 +119,7 @@ fi
 # Coalesce double clicks while Steam is starting. The lock lives only in this
 # runner, and is released when the compositor and its children exit.
 if ! flock -w 15 9; then
-  notify_error "Steam 仍在启动或退出，请稍后重试。"
+  notify_error "Steam is still starting or stopping. Please try again shortly."
   exit 1
 fi
 exec 8>&-
