@@ -26,6 +26,8 @@
 !docker/**
 !scripts
 !scripts/**
+!tools
+!tools/**
 
 # The HDR refresh image is built from the vendored compositor plugin. Keep it
 # in the Docker context so local HDR/zero-copy changes cannot be silently

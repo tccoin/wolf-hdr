@@ -8,8 +8,8 @@ export BWRAP=/usr/bin/bwrap
 # (including Heroic's winepath/fake Epic launcher preparation) can run.
 # Keep DBUS_SESSION_BUS_ADDRESS: it belongs to the actual KDE/Gamescope session.
 unset DBUS_SYSTEM_BUS_ADDRESS
-mode=desktop
-if [ "${1:-}" = --wolf-hdr ]; then mode=hdr; shift; fi
+# Accept old desktop shortcuts without nesting the launcher in Gamescope.
+if [ "${1:-}" = --wolf-hdr ]; then shift; fi
 notify_error() {
   echo "$*" >&2
   command -v kdialog >/dev/null && kdialog --error "$*" || true
@@ -48,27 +48,27 @@ if [[ "$previous_host" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$ ]] && \
   done
 fi
 hostname > "$owner_file"
-export SDL_JOYSTICK_HIDAPI=0
-export SDL_GAMECONTROLLERCONFIG='0500a8394c050000e60c000011810000,Wolf DualSense,a:b0,b:b1,x:b3,y:b2,back:b8,start:b9,guide:b10,leftshoulder:b4,rightshoulder:b5,leftstick:b11,rightstick:b12,leftx:a0,lefty:a1,rightx:a3,righty:a4,lefttrigger:a2,righttrigger:a5,dpup:h0.1,dpright:h0.2,dpdown:h0.4,dpleft:h0.8,platform:Linux,'
-unset PROTON_ENABLE_WAYLAND DISABLE_HDR_WSI VK_INSTANCE_LAYERS
-if [ "$mode" = hdr ]; then
-  if [ "${WOLF_KDE_ENABLE_HDR:-0}" != 1 ]; then
-    notify_error 'HDR is not enabled for this KDE session. Use the desktop Heroic launcher.'
-    exit 1
-  fi
-  export PROTON_ENABLE_HDR=1 DXVK_HDR=1 ENABLE_GAMESCOPE_WSI=1 ENABLE_HDR_WSI=1
-  export GAMESCOPE_WSI_OVERLAY_BOOTSTRAP=0
-  export VKD3D_DISABLE_EXTENSIONS="${VKD3D_DISABLE_EXTENSIONS:+${VKD3D_DISABLE_EXTENSIONS},}VK_EXT_present_timing"
-  /usr/games/gamescope --backend wayland -e -f --hdr-enabled \
-    --virtual-connector-strategy SingleApplication \
-    --hdr-sdr-content-nits "${WOLF_SDR_REFERENCE_WHITE:-100}" \
-    -W "${GAMESCOPE_WIDTH:-1920}" -H "${GAMESCOPE_HEIGHT:-1080}" \
-    -w "${GAMESCOPE_WIDTH:-1920}" -h "${GAMESCOPE_HEIGHT:-1080}" \
-    -r "${GAMESCOPE_REFRESH:-60}" -- \
-    env VK_INSTANCE_LAYERS=VK_LAYER_FROG_gamescope_wsi_x86_64 \
-    /opt/Heroic/heroic --ozone-platform=x11 "$@"
-else
-  unset PROTON_ENABLE_HDR DXVK_HDR ENABLE_GAMESCOPE_WSI ENABLE_HDR_WSI
-  unset GAMESCOPE_WSI_OVERLAY_BOOTSTRAP GAMESCOPE_WAYLAND_DISPLAY
-  /opt/Heroic/heroic --ozone-platform=x11 "$@"
+if ! python3 /usr/local/share/wolf/heroic-game-defaults.py; then
+  notify_error 'Could not configure the Heroic game launcher. Existing settings were preserved; check the launch log.'
+  exit 1
 fi
+# Use the Linux evdev path verified against the actual Wolf DualSense.
+export SDL_JOYSTICK_HIDAPI="${SDL_JOYSTICK_HIDAPI:-0}"
+if [ "$SDL_JOYSTICK_HIDAPI" = "0" ]; then
+  export SDL_GAMECONTROLLERCONFIG='0500a8394c050000e60c000011810000,Wolf DualSense,a:b0,b:b1,x:b3,y:b2,back:b8,start:b9,guide:b10,leftshoulder:b4,rightshoulder:b5,leftstick:b11,rightstick:b12,leftx:a0,lefty:a1,rightx:a3,righty:a4,lefttrigger:a2,righttrigger:a5,dpup:h0.1,dpright:h0.2,dpdown:h0.4,dpleft:h0.8,platform:Linux,'
+fi
+# Keep Electron and prefix maintenance on KDE. Only actual game launches use
+# the wrapper, before UMU creates its runtime and Wine connects to XWayland.
+export WOLF_HEROIC_WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-}"
+unset PROTON_ENABLE_WAYLAND DISABLE_HDR_WSI VK_INSTANCE_LAYERS
+unset PROTON_ENABLE_HDR DXVK_HDR ENABLE_GAMESCOPE_WSI ENABLE_HDR_WSI
+unset GAMESCOPE_WSI_OVERLAY_BOOTSTRAP GAMESCOPE_WAYLAND_DISPLAY
+# Heroic runs Wine prefix maintenance (wineboot/winepath) before its game
+# wrapper. Wine caches the monitor's HDR capability during that maintenance;
+# enabling DXVK_HDR only in the later Gamescope child leaves Advanced Color
+# disabled even though Vulkan already exposes HDR formats. These Wine-only
+# flags must be present early; keep the Vulkan WSI layer game-only.
+if [ "${WOLF_KDE_ENABLE_HDR:-0}" = 1 ] && [ "${WOLF_HEROIC_GAME_HDR:-1}" != 0 ]; then
+  export DXVK_HDR=1 PROTON_ENABLE_HDR=1
+fi
+/opt/Heroic/heroic --ozone-platform=x11 "$@"

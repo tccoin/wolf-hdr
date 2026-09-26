@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=DualSense Trigger Test
+Comment=Test DualSense rumble and adaptive triggers over Moonlight
+Exec=xterm -hold -title "DualSense Feedback Test" -e /usr/local/bin/wolf-dualsense-trigger-test
+Icon=input-gaming
+Terminal=false
+Categories=Game;

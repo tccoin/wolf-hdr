@@ -34,6 +34,21 @@ export KWIN_WAYLAND_SCROLL_V120_PER_UNIT=40
 # mounted home directory once as root and immediately drop privileges again;
 # KWin, Plasma and Steam always run as ubuntu.
 if [ "$(id -u)" = "0" ] && [ "${WOLF_KWIN_ROOT_INIT:-0}" != "1" ]; then
+  # Steam runs as the unprivileged KDE user.  It needs uinput write access to
+  # rebuild its virtual XInput pad when Moonlight disconnects and reconnects a
+  # controller while a game is running.  The host device's group is dynamic,
+  # so use its numeric owner instead of assuming the image's `input` group.
+  if [ -c /dev/uinput ]; then
+    uinput_gid="$(stat -c '%g' /dev/uinput)"
+    uinput_group="$(getent group "$uinput_gid" | cut -d: -f1 || true)"
+    if [ -n "$uinput_group" ]; then
+      usermod -a -G "$uinput_group" ubuntu
+    else
+      groupadd -g "$uinput_gid" "wolf-uinput-$uinput_gid"
+      usermod -a -G "wolf-uinput-$uinput_gid" ubuntu
+    fi
+  fi
+
   # Docker passes the host DRM render node through with its *numeric* owner
   # and group.  On this host it is root:root (0660), whereas the image's
   # desktop user is only in the image-local `render` group (GID 992).  Do not
@@ -121,7 +136,15 @@ mkdir -p "$HOME/Desktop"
 install -m 0755 /usr/local/share/wolf/steam.desktop "$HOME/Desktop/steam.desktop"
 install -m 0755 /usr/local/share/wolf/steam-big-picture.desktop "$HOME/Desktop/steam-big-picture.desktop"
 install -m 0755 /usr/local/share/wolf/heroic.desktop "$HOME/Desktop/heroic.desktop"
-install -m 0755 /usr/local/share/wolf/heroic-hdr.desktop "$HOME/Desktop/heroic-hdr.desktop"
+install -m 0755 /usr/local/share/wolf/dualsense-trigger-test.desktop "$HOME/Desktop/dualsense-trigger-test.desktop"
+install -m 0755 /usr/local/share/wolf/dlssnr.desktop "$HOME/Desktop/dlssnr.desktop"
+install -m 0755 /usr/local/share/wolf/return-to-wolf-ui.desktop "$HOME/Desktop/return-to-wolf-ui.desktop"
+# Retire only the old Wolf-generated shortcut; preserve user-customized files.
+if [ -f "$HOME/Desktop/heroic-hdr.desktop" ] && \
+   grep -qx 'Exec=/usr/local/bin/heroic --wolf-hdr' "$HOME/Desktop/heroic-hdr.desktop"; then
+  mkdir -p "$HOME/.local/share/wolf/retired-shortcuts"
+  mv -n "$HOME/Desktop/heroic-hdr.desktop" "$HOME/.local/share/wolf/retired-shortcuts/"
+fi
 
 # Wolf removes one-shot runner containers after an early exit.  Keep the
 # compositor and Plasma startup trace in the existing runner-state mount so a
@@ -163,7 +186,12 @@ exec dbus-run-session -- bash -lc '
   # exposed those capabilities to KScreen. Enable both output modes before
   # Plasma starts so a new runner is HDR from its first rendered frame.
   if [ "${WOLF_KDE_ENABLE_HDR:-0}" = "1" ]; then
-    if ! kscreen-doctor output.WL-0.hdr.enable output.WL-0.wcg.enable >>"$kwin_log" 2>&1; then
+    # Do not set maxBrightnessOverride here. KScreen owns that persisted user
+    # calibration and must restore exactly what the user saved. The separate
+    # WOLF_KDE_HDR_PEAK_NITS value only supplies the uncalibrated KWin base peak;
+    # WOLF_HDR_PEAK_NITS describes the game/stream display contract.
+    if ! kscreen-doctor output.WL-0.hdr.enable output.WL-0.wcg.enable \
+        >>"$kwin_log" 2>&1; then
       echo "[wolf-selkies-kwin] failed to enable nested HDR/WCG" >&2
     fi
   fi
@@ -194,14 +222,19 @@ exec dbus-run-session -- bash -lc '
     # only terminates its Steam process, leaving the shared Steam library,
     # login and controller state intact for the normal Steam HDR tiles.
     steam_log=/home/retro/wolf-selkies-steam.log
-    echo "[wolf-selkies-kwin] starting existing Steam profile" >&2
+    steam_mode="${WOLF_KDE_STEAM_MODE:-big-picture}"
+    echo "[wolf-selkies-kwin] starting existing Steam profile ($steam_mode)" >&2
     mkdir -p /home/retro/.local/share
     if [ ! -e /home/retro/.local/share/Steam ]; then
       ln -s /home/retro/.steam/steam /home/retro/.local/share/Steam
     fi
     # The same wrapper is installed at the path used by the desktop shortcut.
     # It owns HDR/controller environment and can reopen Steam after quitting.
-    /usr/bin/steam >"$steam_log" 2>&1 &
+    if [ "$steam_mode" = "big-picture" ]; then
+      /usr/bin/steam --wolf-big-picture >"$steam_log" 2>&1 &
+    else
+      /usr/bin/steam --wolf-desktop >"$steam_log" 2>&1 &
+    fi
     steam_pid=$!
   fi
   # Plasma occasionally exits during portal/X11 initialisation in a nested

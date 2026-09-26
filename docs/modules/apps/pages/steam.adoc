@@ -94,7 +94,7 @@ You can also press `Right Shift` + `F11` to change the position of the overlay o
 
 == Using alternative Proton ==
 
-From where your `/etc/wolf` is mounted in your host, add the desired proton files to `/etc/wolf/profile_data/${profile_id}/WolfSteam/.steam/debian-installation/compatibilitytools.d/`
+From where your `/etc/wolf` is mounted in your host, add the desired Proton files to `/etc/wolf/profile_data/${profile_id}/WolfSteam/.steam/compatibilitytools.d/`. This is the compatibility-tool directory scanned by Steam in the Wolf profile; placing tools under `.steam/steam/compatibilitytools.d/` will not register them.
 
 [NOTE]
 ====
@@ -104,7 +104,7 @@ In order to add this, you must have already started the user once for said profi
 === Example for ProtonGE ===
 
 * Download the latest ProtonGE release from https://github.com/GloriousEggroll/proton-ge-custom/releases
-* Extract the release tarball into `/etc/wolf/profile_data/${profile_id}/WolfSteam/.steam/debian-installation/compatibilitytools.d/`
+* Extract the release tarball into `/etc/wolf/profile_data/${profile_id}/WolfSteam/.steam/compatibilitytools.d/`
 * Restart Steam
 * Select the desired ProtonGE version in the Steam game's properties under "Compatibility"'
 

@@ -44,10 +44,10 @@ when performing this check. `--no-cache` can force recompilation on later runs.
   fake-udev; then assembly of an ABI-matched NVENC/CUDA/GL runtime.
 * `docker/kde-hdr.Dockerfile`: public Selkies base, distro KWin source
   `4:6.6.6-0ubuntu0.1`, and Gamescope commit
-  `05949f8149bb5d16b006624d319a76e2433caf4c`.
+  `ad2763da1c48860f649abfe842a087188dcb6e20`.
 * `docker/patches/`: KWin HDR/PQ, calibration, explicit Gamescope color metadata
-  and wheel patches; Gamescope pointer/remap/PQ/WSI and shader-worker shutdown
-  patches. `docker/nvcodec-rgb10-hdr-vui.patch` fixes HDR
+  and wheel patches; Gamescope pointer/PQ/WSI, Steam UI focus, and shader-worker
+  shutdown patches. `docker/nvcodec-rgb10-hdr-vui.patch` fixes HDR
   signaling in the encoder. Patch failures stop the build.
 * `src/`: Wolf server/controller/lifecycle fixes in their original modules.
 * `third_party/gst-wayland-display/`: compositor fixes and a version-controlled
@@ -73,6 +73,32 @@ repositories: this provides an independently buildable source graph, not a
 promise that every future build is byte-identical. Keep distro source versions
 and public base digests compatible when updating them.
 
+== Ownership and upstream upgrades
+
+The HDR stack has two deliberately different kinds of changes:
+
+* Wolf server code, launcher scripts, tests, the DualSense utility, and the
+  default `Steam (KDE)` / `KDE` entries are normal repository source files.
+  They are not downstream patches because this repository owns them.
+* Changes to upstream KWin, Gamescope, GStreamer, Wine/Proton and Inputtino are
+  versioned patch files. The Dockerfiles and `scripts/build-proton-scepad.sh`
+  apply them explicitly; an unappliable patch is a build failure.
+
+The default configuration seeds `Steam (KDE)` before `KDE`. The former starts
+KDE and then HDR Big Picture; the latter starts KDE without automatically
+opening Steam. Existing Wolf configs are intentionally preserved, so add those
+two tracked blocks to an existing config or recreate only its app list after
+backing it up. Do not copy a workstation config: profiles, pairing keys,
+certificates, mounted paths and library locations are host-specific.
+
+When updating an upstream dependency, first update its digest/ref/version in
+the Dockerfile on a branch, then run every corresponding `git apply --check`
+or build stage. Rebase each failing patch against that exact source revision;
+never omit a failing patch or use a fuzzy apply. Finally run the source tests,
+`scripts/verify-hdr-image.sh`, and the isolated KDE HDR stack test before
+updating the pin. The old pin remains reproducible, while the explicit failure
+prevents an upstream update from silently dropping HDR, input or color fixes.
+
 == New-host setup
 
 Install the NVIDIA driver and NVIDIA Container Toolkit. Find the actual KMS
@@ -96,10 +122,27 @@ files are *not* overwritten; add the app block from
 If app rendering and encoding use different devices, set the KDE app's
 `render_node` to the appropriate render node in that host's config.
 
-Enable HDR in Moonlight and use the KDE HDR app. The default monitor peak is
-derived from parent feedback, not hard-coded to one display. Set
-`WOLF_KDE_HDR_PEAK_NITS` in the app environment or configure KDE's peak luminance
-for the actual client display (for example, 550 nits).
+Enable HDR in Moonlight and use the KDE HDR app. Wolf UI's *Settings → Virtual
+HDR display peak* controls `runtime.hdr_peak_nits` (default 1000): it is the
+global peak reported by Wolf's virtual display to every HDR game. It is separate
+from KDE's own peak-luminance setting (`WOLF_KDE_HDR_PEAK_NITS` or KDE Display
+Configuration), which calibrates the nested desktop. Changing the Wolf value
+requires a fresh KDE session for its compositor to obtain the new metadata;
+game-specific paper-white/brightness controls remain independent.
+The same global value is written into the HEVC HDR10 mastering peak and MaxCLL
+(with MaxFALL capped at 400 nit), so the EDID seen by the game and the stream
+decoded by Moonlight describe one display contract.
+The nested Gamescope session also writes this value into the EDID exposed to
+Windows games. It deliberately does not inherit KDE/KScreen's independently
+calibrated peak, including an override saved while the desktop was already
+running; restart Steam's Gamescope session after changing the global value.
+KDE's HDR calibration pattern is rendered inside that nested desktop and then
+passes through Wolf's encoder, Moonlight's macOS EDR layer and the physical
+display. It is therefore not a luminance meter for the physical monitor: a
+value such as 1400 from that pattern is only a persisted KScreen override for
+the virtual output. Wolf preserves the value saved by KScreen; it does not
+replace it at session startup. `WOLF_KDE_HDR_PEAK_NITS` supplies only the
+uncalibrated base peak and does not change the global game/display peak.
 SDR reference white is 100 nits. Transport HDR metadata stays fixed across app
 switches to avoid an encoder renegotiation/flash.
 KWin preserves Gamescope's explicit reference-white/mastering information;
@@ -115,10 +158,12 @@ mounted separately. Do not copy another machine's profile over a live session.
 
 The image installs the checksum-pinned public Heroic 2.21.0 package, matching
 the existing standalone runner instead of migrating a shared profile with the
-base image's newer launcher. The desktop provides `Heroic Games Launcher` (native KDE)
-and `Heroic Fullscreen (HDR)` (Gamescope). Exit Heroic before switching modes.
-Neither icon launches a game automatically. Both use the system bubblewrap
-helper for Proton/UMU and do not add a global `--no-sandbox` bypass. Heroic
+base image's newer launcher. The desktop provides one `Heroic Games Launcher`
+window on native KDE. Only launched games enter a separate fullscreen Gamescope
+HDR window; Alt+Tab can switch between that window, Heroic and other KDE apps.
+The obsolete Wolf fullscreen-launcher shortcut is moved out of the desktop to
+`~/.local/share/wolf/retired-shortcuts/`. The launcher uses the system bubblewrap
+helper for Proton/UMU and does not add a global `--no-sandbox` bypass. Heroic
 2.21's upstream main window enables Node integration, so its main renderer is
 not fully sandboxed; do not confuse this with Chrome's separately verified
 namespace/seccomp sandbox. This integration does not patch Heroic's internals.
@@ -138,6 +183,25 @@ Proton paths. It does not replace KDE's entire `.config` or `.local`, copy
 credentials into an image, or overwrite conflicting local data. The source
 must be writable by the container's desktop UID. Do not open the old standalone
 tile and the KDE launcher against the same profile at the same time.
+While holding its lifetime lock, the launcher installs `wolf-heroic-game` into
+Heroic's global wrapper defaults and existing explicit per-game wrapper lists.
+Other wrappers and game options are preserved; originals are backed up with
+private permissions under `~/.config/heroic/wolf-game-wrapper-backup/`.
+This profile now expects the KDE image's wrapper; restore those original files
+with Heroic stopped before reusing the profile in an older standalone image.
+New games inherit the default wrapper. In an HDR KDE session it starts Gamescope
+before UMU/Wine, enables the HDR WSI layer only for the game, and uses the same
+SDR reference-white calibration as Steam. It does not use Steam's `-e` focus
+policy. Games must still support HDR and have their own HDR option enabled.
+The launcher's early Wine maintenance also receives `DXVK_HDR=1` and
+`PROTON_ENABLE_HDR=1`: Wine caches Windows Advanced Color capability during
+prefix initialization, before Heroic invokes the game wrapper. Without this,
+games such as Alan Wake 2 can hide HDR despite Vulkan exposing HDR formats.
+These flags do not put Electron in Gamescope or load its Vulkan WSI layer.
+On SDR desktops it passes through unchanged. For a game-specific opt-out, set
+`WOLF_HEROIC_GAME_HDR=0`, `DXVK_HDR=0`, and `PROTON_ENABLE_HDR=0` in that game's
+environment options (including the early Wine maintenance). An explicitly
+configured outer Gamescope is also respected without creating a nested one.
 The launcher also exposes this selected shared directory inside Proton's
 pressure-vessel runtime, so symlinked UMU helpers, prefixes and games stay
 reachable. Like the Steam wrapper, it clears the base appliance's obsolete
@@ -146,9 +210,43 @@ UMU fails before Wine starts, and Heroic's fake Epic launcher preparation can
 report a misleading empty-destination copy error.
 For a non-game preflight, run `tests/platforms/linux/check-heroic-proton.py`
 inside the KDE container as the desktop user, passing Heroic's main-process
-PID. It checks the launcher's actual environment and runs only `winepath` in
+PID (optionally followed by `--game-wrapper` to check the game-only Gamescope
+route too). It checks the launcher's actual environment and runs only `winepath` in
 each configured Proton prefix. This can initialize normal Wine metadata, but
 does not launch a game, alter game settings, or modify saves.
+For the Windows API regression, export the optional `wine-hdr-probe` Docker
+target, copy `wine-hdr-capability.exe` into the test container, and add
+`--hdr-probe /path/to/wine-hdr-capability.exe` to that preflight (with and without
+`--game-wrapper`). It queries `DisplayConfigGetDeviceInfo` in each configured
+Proton prefix and requires Advanced Color supported/enabled with 10-bit output.
+Stop games first: Proton serializes access to a running prefix. This catches
+capability-cache failures that a Vulkan/PQ test by itself cannot detect.
+`check-steam-proton-hdr.py STEAM_PID --proton /path/to/proton-directory
+--hdr-probe /path/to/wine-hdr-capability.exe` performs the equivalent API check
+using Steam's early environment and the Steam Gamescope mode, with a fresh
+temporary prefix and an installed UMU runtime. It never touches Steam's
+existing compatdata; its printed temporary prefix is retained for inspection.
+
+=== Steam desktop game defaults
+
+Steam does not provide a global Linux launch-option field. On each *desktop*
+Steam start, Wolf discovers installed game manifests and safely writes an
+equivalent default wrapper into the active account's `localconfig.vdf` entries.
+The game then opens in its own fullscreen HDR Gamescope window while Steam stays
+an ordinary KDE window. Existing launch options are retained after `%command%`;
+for example, `--launcher-skip` still reaches Cyberpunk. The original values are
+recorded privately in `~/.steam/steam/wolf-kde-game-defaults.json` before their
+first change. The utility refuses to edit while Steam is running.
+
+Steam runtime components (Proton, Steam Linux Runtime, and redistributables)
+are deliberately excluded. The default is applied to all currently installed games and to newly installed
+apps on the next desktop-Steam start. This is intentional: Steam owns and can
+rewrite its config while running. Exit/reopen desktop Steam after installing a
+game if you need the wrapper immediately. Big Picture does not run this
+reconciliation, and its existing outer HDR Gamescope is detected by the game
+wrapper and passed through without a nested compositor. Set
+`WOLF_STEAM_GAME_HDR=0` in a game's existing launch environment only when a
+specific game needs an SDR opt-out.
 Unknown old Electron singleton locks require an operator to verify that their
 owning container has stopped; the launcher never blindly deletes them.
 

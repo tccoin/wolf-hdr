@@ -141,6 +141,33 @@ gstreamer = {} #<7>
 <6> *profiles*: a list of xref:_profiles[profiles], each contains a list of xref:_defining_apps[apps]
 <7> *gstreamer* audio/video pipeline definitions, see xref:_gstreamer[]
 
+=== Runtime settings
+
+Wolf UI persists service-wide settings in the `[runtime]` table. In particular,
+`hdr_peak_nits` is the peak luminance advertised by Wolf's virtual HDR display
+to games (100–10000, default `1000`). It is not KDE's desktop calibration and
+does not overwrite a game's own HDR brightness or paper-white setting. Restart
+the KDE desktop session after changing it so nested compositors request the new
+display metadata.
+Wolf also uses this value for the HDR10 stream mastering peak and MaxCLL, so
+the virtual EDID and Moonlight's decoded stream remain consistent.
+Nested Gamescope sessions use the same value for the Windows display EDID and
+do not copy KDE/KScreen's separate calibration override. Restart an existing
+Steam Gamescope session after changing `hdr_peak_nits`.
+
+For the nested KDE desktop, use `WOLF_KDE_HDR_PEAK_NITS` independently. KDE's
+calibration image is viewed through the complete streaming and client
+tone-mapping path, so its saved cutoff (for example 1400) is a virtual-output
+override rather than a measurement of the monitor's physical peak. KScreen's
+saved override is preserved across KDE sessions; `WOLF_KDE_HDR_PEAK_NITS` is
+the base peak used only when no saved calibration override exists.
+
+[source,toml]
+....
+[runtime]
+hdr_peak_nits = 1000
+....
+
 [#_profiles]
 === Profiles
 

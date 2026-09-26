@@ -16,7 +16,8 @@ for argument in "$@"; do
     -h|--help)
       echo 'Usage: bash scripts/build-hdr-nvcodec.sh [--no-cache] [--verify-gpu] [--deploy]'
       echo 'Builds Wolf and KDE HDR from this repository and public dependencies.'
-      echo 'Optional: WOLF_BUILDER, BUILD_JOBS, WOLF_OUTPUT_IMAGE, WOLF_KDE_IMAGE.'
+      echo 'Optional: WOLF_BUILDER, BUILD_JOBS, WOLF_OUTPUT_IMAGE, WOLF_KDE_IMAGE,'
+      echo 'INPUTTINO_PS5_USB_PERSONA (default: ON).'
       echo '--deploy requires an explicit WOLF_COMPOSE_FILE; no deployment by default.'
       exit 0 ;;
     *) echo "Unknown argument: $argument" >&2; exit 2 ;;
@@ -28,10 +29,11 @@ fi
 if [ -n "${WOLF_BUILDER:-}" ]; then extra+=(--builder "$WOLF_BUILDER"); fi
 # Each Dockerfile is a complete graph rooted only in digest-pinned public images.
 docker buildx build --load --pull --progress=plain "${extra[@]}" \
-  --build-arg "BUILD_JOBS=${BUILD_JOBS:-4}" \
+  --build-arg "BUILD_JOBS=${BUILD_JOBS:-16}" \
+  --build-arg "INPUTTINO_PS5_USB_PERSONA=${INPUTTINO_PS5_USB_PERSONA:-ON}" \
   -f "$repo_dir/docker/wolf.nvcodec-runtime.Dockerfile" -t "$wolf_image" "$repo_dir"
 docker buildx build --load --pull --progress=plain "${extra[@]}" \
-  --build-arg "BUILD_JOBS=${BUILD_JOBS:-4}" \
+  --build-arg "BUILD_JOBS=${BUILD_JOBS:-16}" \
   -f "$repo_dir/docker/kde-hdr.Dockerfile" -t "$kde_image" "$repo_dir"
 if "$verify_gpu"; then
   bash "$script_dir/verify-hdr-image.sh" "$wolf_image"

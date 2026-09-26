@@ -36,13 +36,21 @@ notify_error() {
 }
 
 # Serialize mode transitions, separately from the lifetime/startup lock.
-exec 8>"${XDG_RUNTIME_DIR:?}/wolf-kde-steam-transition.lock"
+# A previous diagnostic or a manually invoked launcher can leave these
+# regenerable files owned by root.  flock only needs a readable descriptor;
+# opening without O_TRUNC lets the normal desktop user recover that stale
+# state instead of preventing Steam from starting before it reaches Steam.
+transition_lock="${XDG_RUNTIME_DIR:?}/wolf-kde-steam-transition.lock"
+startup_lock="$XDG_RUNTIME_DIR/wolf-kde-steam-v2.lock"
+[ -e "$transition_lock" ] || : >"$transition_lock"
+[ -e "$startup_lock" ] || : >"$startup_lock"
+exec 8<"$transition_lock"
 if ! flock -w 45 8; then
   notify_error "Steam is switching modes. Please try again shortly."
   exit 1
 fi
 # v2 also migrates away from the old inode inherited by external browsers.
-exec 9>"$XDG_RUNTIME_DIR/wolf-kde-steam-v2.lock"
+exec 9<"$startup_lock"
 
 existing_display() (
   local entry
@@ -57,7 +65,14 @@ existing_display() (
 pid=""
 # A second click can arrive before Steam has forked its real executable.
 for _ in {1..150}; do
-  pid=$(pgrep -o -u "$(id -u)" -x steam) && break
+  while read -r candidate; do
+    [ -n "$candidate" ] || continue
+    state=$(ps -o stat= -p "$candidate" 2>/dev/null | tr -d ' ')
+    case "$state" in Z*|'') continue ;; esac
+    pid=$candidate
+    break
+  done < <(pgrep -u "$(id -u)" -x steam || true)
+  [ -n "$pid" ] && break
   flock -n 9 && break
   sleep .1
 done
@@ -97,6 +112,17 @@ if [ "$return_to_desktop" = 1 ]; then
   exit 0
 fi
 
+# Steam has no global Linux game launch option. Before starting a *desktop*
+# client, install our default wrapper in the active account's installed-game
+# entries. It preserves custom launch arguments after %command%; never edit a
+# live Steam config, and never alter Big Picture's outer Gamescope session.
+if [ -z "$pid" ] && [ "$requested_mode" != big-picture ]; then
+  if ! python3 /usr/local/share/wolf/steam-game-defaults.py; then
+    notify_error "Could not apply Steam HDR game defaults. Steam was not started; inspect wolf-selkies-steam.log."
+    exit 1
+  fi
+fi
+
 # An existing Steam may belong to Gamescope or directly to Plasma :0.
 # Forward commands to its actual display without starting another compositor or
 # running the appliance bootstrap against a different installation directory.
@@ -125,33 +151,46 @@ fi
 exec 8>&-
 export WOLF_KDE_STEAM_MODE=${requested_mode/auto/desktop}
 
-# Linux hid-playstation evdev ordering, verified against the actual Wolf pad.
-# HIDAPI uses a different GUID and button ordering; never share this mapping.
-export SDL_JOYSTICK_HIDAPI=0
-export SDL_GAMECONTROLLERCONFIG="0500a8394c050000e60c000011810000,Wolf DualSense,a:b0,b:b1,x:b3,y:b2,back:b8,start:b9,guide:b10,leftshoulder:b4,rightshoulder:b5,leftstick:b11,rightstick:b12,leftx:a0,lefty:a1,rightx:a3,righty:a4,lefttrigger:a2,righttrigger:a5,dpup:h0.1,dpright:h0.2,dpdown:h0.4,dpleft:h0.8,platform:Linux,"
+# Keep SDL on the Linux evdev path. It is the path verified against the actual
+# Wolf pad and avoids HIDAPI's inconsistent controller visibility in Steam.
+export SDL_JOYSTICK_HIDAPI="${SDL_JOYSTICK_HIDAPI:-0}"
+if [ "$SDL_JOYSTICK_HIDAPI" = "0" ]; then
+  export SDL_GAMECONTROLLERCONFIG="0500a8394c050000e60c000011810000,Wolf DualSense,a:b0,b:b1,x:b3,y:b2,back:b8,start:b9,guide:b10,leftshoulder:b4,rightshoulder:b5,leftstick:b11,rightstick:b12,leftx:a0,lefty:a1,rightx:a3,righty:a4,lefttrigger:a2,righttrigger:a5,dpup:h0.1,dpright:h0.2,dpdown:h0.4,dpleft:h0.8,platform:Linux,"
+fi
 export PROTON_ENABLE_HDR=1 DXVK_HDR=1 PROTON_USE_XALIA=0
 
 if [ "$WOLF_KDE_STEAM_MODE" = big-picture ] && [ "${WOLF_KDE_GAMESCOPE_HDR:-0}" = 1 ]; then
+  # Gamescope publishes this EDID path to Proton on its XWayland root window.
+  # Without it, DXVK invents a 1499-nit display even when Wolf advertises 1000.
+  export GAMESCOPE_PATCHED_EDID_FILE="$XDG_RUNTIME_DIR/wolf-steam-gamescope-edid.bin"
   # Experimental 11 / vkd3d 3.1 queries a null swapchain through present_timing
   # when focus changes to Overlay (winevulkan +0x2a685). Keep Overlay/HDR and
   # the normal KHR_present_wait path, but avoid that optional timing path.
   export VKD3D_DISABLE_EXTENSIONS="${VKD3D_DISABLE_EXTENSIONS:+${VKD3D_DISABLE_EXTENSIONS},}VK_EXT_present_timing"
   export ENABLE_GAMESCOPE_WSI=1 ENABLE_HDR_WSI=1
-  # Cyberpunk queries HDR formats once at startup; do not hide them initially.
-  export GAMESCOPE_WSI_OVERLAY_BOOTSTRAP=0
+  # Keep the game's initial XWayland swapchain composited long enough for the
+  # Steam Overlay to discover and attach to it. If Gamescope WSI bypasses
+  # XWayland immediately, Proton can receive an Overlay-activated callback
+  # without the matching deactivation callback on return from Big Picture;
+  # Wine then suppresses all keyboard and controller input for the game.
+  # The bootstrap only lasts ten seconds and does not change the HDR mode.
+  export GAMESCOPE_WSI_OVERLAY_BOOTSTRAP=1
   export STEAM_GAMESCOPE_COLOR_MANAGED=1 STEAM_GAMESCOPE_VIRTUAL_WHITE=1
   export DISABLE_VK_LAYER_VALVE_steam_fossilize_1=1
   export VK_LOADER_LAYERS_DISABLE="${VK_LOADER_LAYERS_DISABLE:+${VK_LOADER_LAYERS_DISABLE},}VK_LAYER_VALVE_steam_fossilize_64"
   unset PROTON_ENABLE_WAYLAND
   export WAYLAND_DISPLAY=wayland-kde DISPLAY=:0
+  gamescope_debug_focus_args=()
+  if [ "${WOLF_KDE_GAMESCOPE_DEBUG_FOCUS:-0}" = 1 ]; then
+    gamescope_debug_focus_args+=(--debug-focus)
+  fi
   # Big Picture owns a fullscreen native-resolution Gamescope surface.
   # Desktop Steam below is a direct KWin client, without an outer compositor.
-  # -e selects SteamControlled focus by default, which needs Gamepad UI to
-  # choose a connector. Desktop Steam supplies no choice and disappears from
-  # KWin entirely. Override AFTER -e while retaining Steam/HDR integration.
-  # Keep the lifetime lock in this launcher only. Steam can spawn persistent
+  # -e is required for Steam's Big Picture focus/overlay routing under the
+  # nested compositor. Keep the lifetime lock in this launcher only; Steam can
+  # spawn persistent browsers that must not hold it after Steam exits.
   # browsers; they must not keep the lock after Steam itself has exited.
-  /usr/games/gamescope --backend wayland -e -f --hdr-enabled \
+  /usr/games/gamescope "${gamescope_debug_focus_args[@]}" --backend wayland -e -f --hdr-enabled \
     --virtual-connector-strategy SingleApplication \
     --hdr-sdr-content-nits "${WOLF_SDR_REFERENCE_WHITE:-203}" \
     -W "${GAMESCOPE_WIDTH:-3440}" -H "${GAMESCOPE_HEIGHT:-1440}" \

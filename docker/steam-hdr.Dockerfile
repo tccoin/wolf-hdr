@@ -4,7 +4,7 @@
 # swapchain even though Gamescope is running with --hdr-enabled.
 FROM ghcr.io/games-on-whales/steam:edge AS gamescope_wsi_builder
 
-ARG GAMESCOPE_REF=05949f8149bb5d16b006624d319a76e2433caf4c
+ARG GAMESCOPE_REF=ad2763da1c48860f649abfe842a087188dcb6e20
 
 COPY docker/patches/gamescope-wsi-overlay-bootstrap.patch /tmp/gamescope-wsi-overlay-bootstrap.patch
 

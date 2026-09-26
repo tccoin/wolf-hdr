@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Return to Wolf UI
+Comment=Close this KDE session and return to the Wolf app launcher
+Exec=/usr/local/bin/wolf-return-to-ui
+Icon=go-previous
+Terminal=false
+Categories=System;
+StartupNotify=false

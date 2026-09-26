@@ -1,0 +1,66 @@
+diff --git a/src/steamcompmgr.cpp b/src/steamcompmgr.cpp
+--- a/src/steamcompmgr.cpp
++++ b/src/steamcompmgr.cpp
+@@ -4341,7 +4341,14 @@ pick_primary_focus_and_override(
+ 	bool controlledFocus = eStrategy != gamescope::VirtualConnectorStrategies::SingleApplication || focusControlWindow != None || !ctxFocusControlAppIDs.empty();
+ 	if ( controlledFocus )
+ 	{
+-		if ( eStrategy == gamescope::VirtualConnectorStrategies::SteamControlled )
++		// A nested Steam session may deliberately use SingleApplication so its
++		// outer Gamescope surface remains attached to one desktop window. Steam
++		// still publishes GAMESCOPECTRL_BASELAYER_APPID in that mode to switch
++		// between the game and full-screen UI routes such as Media/Screenshots.
++		// Honour that explicit ordering without requiring SteamControlled's
++		// connector selection policy.
++		if ( eStrategy == gamescope::VirtualConnectorStrategies::SteamControlled ||
++			( eStrategy == gamescope::VirtualConnectorStrategies::SingleApplication && !ctxFocusControlAppIDs.empty() ) )
+ 		{
+ 			if ( focusControlWindow != None )
+ 			{
+@@ -4669,14 +4676,16 @@ void xwayland_ctx_t::DetermineAndApplyFocus( const std::vector< steamcompmgr_win
+ 
+ 	if ( ctx->focus.focusWindow )
+ 	{
+-		if ( prevFocusWindow != ctx->focus.focusWindow )
+-		{
+-			Window id = ctx->focus.focusWindow->xwayland().id;
++		Window id = ctx->focus.focusWindow->xwayland().id;
+ 
+-			/* Some games (e.g. DOOM Eternal) don't react well to being put back as
+-			* iconic, so never do that. Only take them out of iconic. */
+-			set_wm_state( ctx, id, ICCCM_NORMAL_STATE );
++		/* A Steam UI route such as the screenshot gallery can leave the game
++		 * in Iconic state without ever changing the primary focus window. The
++		 * selected focus is always meant to be interactive, so normalize it on
++		 * every focus pass, not only when the selected window changes. */
++		set_wm_state( ctx, id, ICCCM_NORMAL_STATE );
+ 
++		if ( prevFocusWindow != ctx->focus.focusWindow )
++		{
+ 			gpuvis_trace_printf( "determine_and_apply_focus focus %lu", id );
+ 
+ 			if ( debugFocus == true )
+@@ -4763,9 +4772,22 @@ void xwayland_ctx_t::DetermineAndApplyFocus( const std::vector< steamcompmgr_win
+ 	if ( keyboardFocusWindow && ctx->currentKeyboardFocusWindow && find_win( ctx, ctx->currentKeyboardFocusWindow ) == keyboardFocusWin )
+ 		keyboardFocusWindow = ctx->currentKeyboardFocusWindow;
+ 
++	// Xwayland focus can move independently while a nested Moonlight seat is
++	// detached and reattached. In that case our cached focus still names the
++	// game, so the internal-state comparisons below miss that Steam's UI kept
++	// the real X input focus. Accept children of the selected toplevel (CEF
++	// popups need this), but repair focus that drifted to another application.
++	Window actualKeyboardFocus = None;
++	int actualKeyboardRevertMode = RevertToNone;
++	XGetInputFocus( ctx->dpy, &actualKeyboardFocus, &actualKeyboardRevertMode );
++	const bool keyboardFocusDrifted = keyboardFocusWindow != None &&
++		actualKeyboardFocus != keyboardFocusWindow &&
++		find_win( ctx, actualKeyboardFocus ) != keyboardFocusWin;
++
+ 	if ( ctx->focus.inputFocusWindow != inputFocus ||
+ 		ctx->focus.inputFocusMode != inputFocus->inputFocusMode ||
+-		ctx->currentKeyboardFocusWindow != keyboardFocusWindow )
++		ctx->currentKeyboardFocusWindow != keyboardFocusWindow ||
++		keyboardFocusDrifted )
+ 	{
+ 		if ( debugFocus == true )
+ 		{

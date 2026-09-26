@@ -29,7 +29,7 @@ if [ -n "${WOLF_PQ_CLIENT:-}" ]; then
   install -m 0755 "$WOLF_PQ_CLIENT" "$test_dir/client/hdr-pq-patches"
 else
   docker buildx build "${extra[@]}" --target hdr-probe \
-    --build-arg "BUILD_JOBS=${BUILD_JOBS:-4}" \
+    --build-arg "BUILD_JOBS=${BUILD_JOBS:-16}" \
     --output "type=local,dest=$test_dir/client" \
     -f "$repo_dir/docker/kde-hdr.Dockerfile" "$repo_dir"
 fi
@@ -65,7 +65,7 @@ docker run -d --name "$desktop" --runtime=nvidia --user root --device /dev/dri \
   -e NVIDIA_VISIBLE_DEVICES=all -e NVIDIA_DRIVER_CAPABILITIES=all \
   -e XDG_RUNTIME_DIR=/probe -e "WAYLAND_DISPLAY=$socket" -e HOME=/home/retro \
   -e WOLF_SESSION_ID=regression -e WOLF_KDE_ENABLE_HDR=1 \
-  -e WOLF_KDE_HDR_PEAK_NITS=550 -e WOLF_KDE_START_STEAM=0 \
+  -e WOLF_KDE_HDR_PEAK_NITS=550 -e WOLF_HDR_PEAK_NITS=1000 -e WOLF_KDE_START_STEAM=0 \
   -e GAMESCOPE_WIDTH=1280 -e GAMESCOPE_HEIGHT=720 -e GAMESCOPE_REFRESH=10 \
   -v "$test_dir:/probe" "$kde_image" /usr/local/bin/wolf-selkies-kwin-entrypoint >/dev/null
 plasma_pid=""
@@ -102,6 +102,29 @@ docker exec -u ubuntu -e "WOLF_PQ_SOURCE_DEPTH=$source_depth" -e XDG_RUNTIME_DIR
 echo "Gamescope exit status: $gamescope_status"
 python3 "$repo_dir/tests/platforms/linux/check-hdr-pq-capture.py" "$test_dir/frames.rgb10" \
   --start-frame "$start" --end-frame "$(frame_count)" --source-depth "$source_depth"
+test "$gamescope_status" -eq 0
+# Exercise the actual Heroic entrypoints with a clean, disposable profile.
+# Keep the desktop launcher open while a game-only HDR window takes focus.
+docker exec -i -u ubuntu "$desktop" python3 - "$plasma_pid" \
+  < "$repo_dir/tests/platforms/linux/check-heroic-desktop.py"
+start="$(frame_count)"
+docker exec -u ubuntu -e "WOLF_PQ_SOURCE_DEPTH=$source_depth" \
+  -e XDG_RUNTIME_DIR=/tmp/wolf-selkies-kwin-regression -e WAYLAND_DISPLAY=wayland-kde \
+  "$desktop" timeout --signal=TERM --kill-after=10s 60s \
+  /usr/local/bin/wolf-heroic-game /probe/client/hdr-pq-patches \
+  >"$test_dir/heroic-game.log" 2>&1
+python3 "$repo_dir/tests/platforms/linux/check-hdr-pq-capture.py" "$test_dir/frames.rgb10" \
+  --start-frame "$start" --end-frame "$(frame_count)" --source-depth "$source_depth"
+start="$(frame_count)"
+# Desktop Steam keeps its client native to KDE; its default game wrapper is
+# the only component that creates this independent HDR Gamescope window.
+docker exec -u ubuntu -e "WOLF_PQ_SOURCE_DEPTH=$source_depth" \
+  -e XDG_RUNTIME_DIR=/tmp/wolf-selkies-kwin-regression -e WAYLAND_DISPLAY=wayland-kde \
+  "$desktop" timeout --signal=TERM --kill-after=10s 60s \
+  /usr/local/bin/wolf-steam-game --appid 999 -- /probe/client/hdr-pq-patches \
+  >"$test_dir/steam-desktop-game.log" 2>&1
+python3 "$repo_dir/tests/platforms/linux/check-hdr-pq-capture.py" "$test_dir/frames.rgb10" \
+  --start-frame "$start" --end-frame "$(frame_count)" --source-depth "$source_depth"
 docker exec "$desktop" ffprobe -v error -read_intervals '%+#1' -select_streams v:0 \
   -show_entries stream=profile,pix_fmt,color_space,color_transfer,color_primaries \
   -of json /probe/output.h265 >"$test_dir/encoded.json"
@@ -115,4 +138,4 @@ assert stream == expected, stream
 print('PASS encoded HEVC HDR signaling:', stream)
 PY
 test "$gamescope_status" -eq 0
-echo 'PASS Chrome + direct KWin PQ + Gamescope/KWin PQ + clean Gamescope exit + NVENC HDR10'
+echo 'PASS Chrome + direct KWin PQ + Steam Big Picture/desktop-game PQ + Heroic desktop/game-only PQ + clean Gamescope exit + NVENC HDR10'

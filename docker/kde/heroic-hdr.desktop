@@ -1,8 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=Heroic Fullscreen (HDR)
-Comment=Launch Heroic and games in a fullscreen Gamescope HDR session
-Exec=/usr/local/bin/heroic --wolf-hdr
-Icon=heroic
-Terminal=false
-Categories=Game;

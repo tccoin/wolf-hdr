@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=DLSS5VKLayer Settings
+Comment=Open the DLSS5VKLayer controls and helper status
+Exec=/usr/local/bin/wolf-dlssnr-gui
+Icon=preferences-desktop
+Terminal=false
+Categories=Settings;
+StartupNotify=false

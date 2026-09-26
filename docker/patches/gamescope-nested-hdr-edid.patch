@@ -1,0 +1,77 @@
+diff --git a/src/edid.cpp b/src/edid.cpp
+--- a/src/edid.cpp
++++ b/src/edid.cpp
+@@ -6,6 +6,8 @@
+ #include "hdmi.h"
+ 
++#include <algorithm>
+ #include <cassert>
++#include <cerrno>
+ #include <climits>
+ #include <cstring>
+ #include <cstdlib>
+@@ -133,15 +135,40 @@ namespace gamescope
+ #endif
+         // TODO(JoshA): Need to resolve flInternalDisplayBrightness vs new connector hdrinfo mechanism.
+ 
++        // A nested compositor describes the current KDE output here. That is
++        // useful on a directly attached monitor, but a streamed virtual display
++        // has a separate physical/client peak contract. In particular, changing
++        // KDE calibration while Gamescope is running otherwise leaves Proton
++        // with a stale EDID (for example 1400 nits while Wolf and Moonlight both
++        // signal 1000). Prefer Wolf's global peak when it is valid; this variable
++        // is inherited by every Steam/Heroic Gamescope launcher.
++        uint32_t maxPeakLuminance = hdrInfo.uMaxContentLightLevel;
++        if ( const char *value = getenv( "WOLF_HDR_PEAK_NITS" ); value && *value )
++        {
++            char *end = nullptr;
++            errno = 0;
++            const long parsed = strtol( value, &end, 10 );
++            if ( errno == 0 && end != value && *end == '\0' && parsed >= 100 && parsed <= 10000 )
++            {
++                maxPeakLuminance = uint32_t( parsed );
++            }
++            else
++            {
++                edid_log.errorf( "Ignoring invalid WOLF_HDR_PEAK_NITS: %s", value );
++            }
++        }
++        const uint32_t maxFrameAverageLuminance =
++            std::min<uint32_t>( hdrInfo.uMaxFrameAverageLuminance, maxPeakLuminance );
++
+         edid_log.infof("[edid] Patching HDR static metadata:\n"
+             "    - Max peak luminance = %u nits\n"
+             "    - Max frame average luminance = %u nits",
+-            hdrInfo.uMaxContentLightLevel, hdrInfo.uMaxFrameAverageLuminance );
++            maxPeakLuminance, maxFrameAverageLuminance );
+         const uint8_t new_hdr_static_metadata_block[]
+         {
+             (1 << HDMI_EOTF_SDR) | (1 << HDMI_EOTF_TRADITIONAL_HDR) | (1 << HDMI_EOTF_ST2084), /* supported eotfs */
+             1, /* type 1 */
+-            encode_max_luminance( float( hdrInfo.uMaxContentLightLevel ) ), /* desired content max peak luminance */
+-            encode_max_luminance( float( hdrInfo.uMaxFrameAverageLuminance ) ), /* desired content max frame avg luminance */
++            encode_max_luminance( float( maxPeakLuminance ) ), /* desired content max peak luminance */
++            encode_max_luminance( float( maxFrameAverageLuminance ) ), /* desired content max frame avg luminance */
+             0, /* desired content min luminance -- 0 is technically "undefined" */
+         };
+@@ -164,7 +164,20 @@ namespace gamescope
+                 uint8_t flags = ext_data[3];
+                 if (dtd_start == 0)
+                 {
++                    // GenerateSimpleEdid() copies the nested Wayland base EDID,
++                    // whose CTA extension contains an HDR metadata block but
++                    // incorrectly marks the data-block area as empty. Give the
++                    // existing seven-byte block a valid end offset so the
++                    // configured output luminance is actually written for
++                    // Proton/DXGI instead of falling back to 1499/799 nits.
++                    if (ext_data[4] == 0xe6 && ext_data[5] == 0x06)
++                    {
++                        dtd_start = ext_data[2] = 11;
++                    }
++                    else
++                    {
+                     edid_log.infof("Hmmmm.... dtd start is 0. Interesting... Not going further! :-(");
+                     continue;
++                    }
+                 }
+                 if (flags != 0)

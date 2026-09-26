@@ -18,9 +18,11 @@ struct WolfHdrGl {
   GMutex cleanup_lock;
   GPtrArray *retired_cleanups;
   GLuint sdr_to_pq_program;
+  GLuint pq_copy_program;
   GLuint fullscreen_vao;
   GLuint fbo;
   GLint input_uniform;
+  GLint pq_copy_input_uniform;
   GLint reference_white_uniform;
   gfloat sdr_reference_white_nits;
   gboolean transform_ready;
@@ -102,6 +104,13 @@ static const gchar sdr_to_pq_fragment_shader[] =
     "  out_color = vec4(pq, 1.0);\n"
     "}\n";
 
+/* An imported native-PQ dma-buf is reused by the compositor. Give NVENC an
+ * independent texture so its asynchronous read cannot overlap the next frame. */
+static const gchar pq_copy_fragment_shader[] =
+    "#version 330\n"
+    "uniform sampler2D u_input; in vec2 v_uv; layout(location=0) out vec4 out_color;\n"
+    "void main() { out_color = texture(u_input, v_uv); }\n";
+
 static GLuint
 compile_shader (const GstGLFuncs *gl, GLenum type, const gchar *source)
 {
@@ -126,12 +135,13 @@ prepare_sdr_transform_on_gl_thread (GstGLContext *context, gpointer user_data)
 {
   WolfHdrGl *bridge = user_data;
   const GstGLFuncs *gl = context->gl_vtable;
-  GLuint vertex = 0, fragment = 0;
+  GLuint vertex = 0, fragment = 0, copy_fragment = 0;
   GLint status = GL_FALSE;
 
   vertex = compile_shader (gl, GL_VERTEX_SHADER, sdr_to_pq_vertex_shader);
   fragment = compile_shader (gl, GL_FRAGMENT_SHADER, sdr_to_pq_fragment_shader);
-  if (vertex == 0 || fragment == 0)
+  copy_fragment = compile_shader (gl, GL_FRAGMENT_SHADER, pq_copy_fragment_shader);
+  if (vertex == 0 || fragment == 0 || copy_fragment == 0)
     goto done;
 
   bridge->sdr_to_pq_program = gl->CreateProgram ();
@@ -150,9 +160,25 @@ prepare_sdr_transform_on_gl_thread (GstGLContext *context, gpointer user_data)
   bridge->input_uniform = gl->GetUniformLocation (bridge->sdr_to_pq_program, "u_input");
   bridge->reference_white_uniform = gl->GetUniformLocation (bridge->sdr_to_pq_program,
       "u_reference_white_nits");
+  bridge->pq_copy_program = gl->CreateProgram ();
+  gl->AttachShader (bridge->pq_copy_program, vertex);
+  gl->AttachShader (bridge->pq_copy_program, copy_fragment);
+  gl->LinkProgram (bridge->pq_copy_program);
+  gl->GetProgramiv (bridge->pq_copy_program, GL_LINK_STATUS, &status);
+  if (status != GL_TRUE) {
+    gchar log[2048] = { 0, };
+    gl->GetProgramInfoLog (bridge->pq_copy_program, sizeof (log) - 1, NULL, log);
+    GST_ERROR ("HDR GL bridge: native-PQ copy shader link failed: %s", log);
+    gl->DeleteProgram (bridge->pq_copy_program);
+    bridge->pq_copy_program = 0;
+    goto done;
+  }
+  bridge->pq_copy_input_uniform = gl->GetUniformLocation (bridge->pq_copy_program,
+      "u_input");
   gl->GenVertexArrays (1, &bridge->fullscreen_vao);
   gl->GenFramebuffers (1, &bridge->fbo);
-  bridge->transform_ready = bridge->fullscreen_vao != 0 && bridge->fbo != 0;
+  bridge->transform_ready = bridge->fullscreen_vao != 0 && bridge->fbo != 0 &&
+      bridge->pq_copy_program != 0;
   if (!bridge->transform_ready)
     GST_ERROR ("HDR GL bridge: failed to allocate SDR-to-PQ render objects");
 
@@ -161,6 +187,8 @@ done:
     gl->DeleteShader (vertex);
   if (fragment != 0)
     gl->DeleteShader (fragment);
+  if (copy_fragment != 0)
+    gl->DeleteShader (copy_fragment);
 }
 
 static void
@@ -269,10 +297,10 @@ import_ab30_on_gl_thread (GstGLContext *context, gpointer user_data)
   gl->EGLImageTargetTexture2D (GL_TEXTURE_2D, job->image);
   gl->BindTexture (GL_TEXTURE_2D, 0);
 
-  if (!job->native_pq) {
+  {
     GLuint output_texture = 0;
     if (!job->bridge->transform_ready) {
-      GST_ERROR ("HDR GL bridge: SDR-to-PQ transform is unavailable");
+      GST_ERROR ("HDR GL bridge: HDR transform is unavailable");
       return;
     }
     gl->GenTextures (1, &output_texture);
@@ -287,24 +315,30 @@ import_ab30_on_gl_thread (GstGLContext *context, gpointer user_data)
     gl->FramebufferTexture2D (GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
         output_texture, 0);
     if (gl->CheckFramebufferStatus (GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-      GST_ERROR ("HDR GL bridge: SDR-to-PQ framebuffer is incomplete");
+      GST_ERROR ("HDR GL bridge: HDR framebuffer is incomplete");
       gl->BindFramebuffer (GL_FRAMEBUFFER, 0);
       gl->DeleteTextures (1, &output_texture);
       return;
     }
     gl->Viewport (0, 0, job->width, job->height);
-    gl->UseProgram (job->bridge->sdr_to_pq_program);
+    gl->UseProgram (job->native_pq ? job->bridge->pq_copy_program :
+        job->bridge->sdr_to_pq_program);
     gl->ActiveTexture (GL_TEXTURE0);
     gl->BindTexture (GL_TEXTURE_2D, job->source_texture);
-    gl->Uniform1i (job->bridge->input_uniform, 0);
-    gl->Uniform1f (job->bridge->reference_white_uniform,
-        job->bridge->sdr_reference_white_nits);
+    gl->Uniform1i (job->native_pq ? job->bridge->pq_copy_input_uniform :
+        job->bridge->input_uniform, 0);
+    if (!job->native_pq)
+      gl->Uniform1f (job->bridge->reference_white_uniform,
+          job->bridge->sdr_reference_white_nits);
     gl->BindVertexArray (job->bridge->fullscreen_vao);
     gl->DrawArrays (GL_TRIANGLES, 0, 3);
     gl->BindVertexArray (0);
     gl->BindTexture (GL_TEXTURE_2D, 0);
     gl->UseProgram (0);
     gl->BindFramebuffer (GL_FRAMEBUFFER, 0);
+    /* Complete the sample/copy before the compositor reuses its dma-buf and
+     * before CUDA/NVENC reads this frame's private texture. */
+    gl->Finish ();
     job->texture = output_texture;
   }
   job->ok = TRUE;

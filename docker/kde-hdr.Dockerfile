@@ -2,7 +2,7 @@
 ARG KDE_BASE=ghcr.io/selkies-project/selkies-egl-desktop:26.04@sha256:4389c08124ae18f994c8de341e980a5aea95eb700ae216108c09ade026576111
 FROM ${KDE_BASE} AS kwin-build
 USER root
-ARG BUILD_JOBS=4
+ARG BUILD_JOBS=16
 ARG KWIN_VERSION=4:6.6.6-0ubuntu0.1
 WORKDIR /work
 RUN sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/ubuntu.sources \
@@ -18,8 +18,8 @@ RUN set -eu; for name in hdr-capabilities native-pq hdr-calibration wolf-wheel e
 
 FROM ${KDE_BASE} AS gamescope-build
 USER root
-ARG BUILD_JOBS=4
-ARG GAMESCOPE_REF=05949f8149bb5d16b006624d319a76e2433caf4c
+ARG BUILD_JOBS=16
+ARG GAMESCOPE_REF=ad2763da1c48860f649abfe842a087188dcb6e20
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       build-essential ca-certificates cmake git libavif-dev libcap-dev libdecor-0-dev \
@@ -35,7 +35,7 @@ RUN apt-get update \
  && git -C /work/gamescope submodule update --init --recursive --depth=1
 COPY docker/patches/gamescope-*.patch /tmp/gamescope-patches/
 WORKDIR /work/gamescope
-RUN set -eu; for name in wsi-overlay-bootstrap ubuntu-2604-hdmi-header wayland-pointer-not-touch wayland-remap-configure wayland-pq-reference shader-worker-shutdown; do \
+RUN set -eu; for name in wsi-overlay-bootstrap wsi-auto-hdr10 overlay-focus-restore ubuntu-2604-hdmi-header wayland-pointer-not-touch wayland-restore-active-pointer-constraint wayland-pq-reference shader-worker-shutdown nested-hdr-edid; do \
       git apply /tmp/gamescope-patches/gamescope-${name}.patch || exit 1; \
     done \
  && meson setup /work/gamescope-build . \
@@ -63,6 +63,29 @@ RUN set -eu; \
 
 FROM scratch AS hdr-probe
 COPY --from=hdr-probe-build /work/hdr-probe/hdr-pq-patches /hdr-pq-patches
+
+# Optional Windows-side check for Wine's cached Advanced Color capability.
+# The cross compiler is not installed in the desktop runtime image.
+FROM ${KDE_BASE} AS wine-hdr-probe-build
+USER root
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64-posix
+COPY tests/platforms/linux/wine-hdr-capability.c /work/wine-hdr-capability.c
+RUN x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -o /work/wine-hdr-capability.exe /work/wine-hdr-capability.c -luser32 -ldxgi -ldxguid
+
+FROM scratch AS wine-hdr-probe
+COPY --from=wine-hdr-probe-build /work/wine-hdr-capability.exe /wine-hdr-capability.exe
+
+# Build the small DualSense adaptive-trigger test utility against the same
+# SDL2 GameController API available in the desktop runtime.
+FROM ${KDE_BASE} AS dualsense-trigger-test-build
+USER root
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends build-essential libsdl2-dev \
+ && rm -rf /var/lib/apt/lists/*
+COPY tools/dualsense-trigger-test.c /work/dualsense-trigger-test.c
+RUN cc -O2 -Wall -Wextra -Werror -o /work/wolf-dualsense-trigger-test /work/dualsense-trigger-test.c \
+      $(pkg-config --cflags --libs sdl2)
 
 FROM ${KDE_BASE} AS runner
 ENTRYPOINT []
@@ -102,13 +125,24 @@ RUN curl -fL --retry 3 -o /tmp/heroic.deb \
  && chown -R root:root /opt/Heroic \
  && chmod 4755 /opt/Heroic/chrome-sandbox
 COPY --chmod=0755 docker/wolf-kde-heroic.sh /usr/local/bin/heroic
+COPY --chmod=0755 docker/wolf-heroic-game.sh /usr/local/bin/wolf-heroic-game
 COPY docker/heroic-profile-init.py /usr/local/share/wolf/heroic-profile-init.py
+COPY docker/heroic-game-defaults.py /usr/local/share/wolf/heroic-game-defaults.py
 COPY docker/kde/heroic.desktop /usr/share/applications/heroic.desktop
+COPY --from=dualsense-trigger-test-build /work/wolf-dualsense-trigger-test /usr/local/bin/wolf-dualsense-trigger-test
+COPY docker/kde/dualsense-trigger-test.desktop /usr/share/applications/dualsense-trigger-test.desktop
+COPY docker/kde/dualsense-trigger-test.desktop /usr/local/share/wolf/dualsense-trigger-test.desktop
+COPY docker/kde/dlssnr.desktop /usr/local/share/wolf/dlssnr.desktop
+COPY --chmod=0755 docker/wolf-dlssnr-gui.sh /usr/local/bin/wolf-dlssnr-gui
+COPY --chmod=0755 docker/wolf-return-to-ui.sh /usr/local/bin/wolf-return-to-ui
+COPY docker/kde/return-to-wolf-ui.desktop /usr/local/share/wolf/return-to-wolf-ui.desktop
 COPY --chmod=0755 docker/wolf-selkies-kwin-entrypoint.sh /usr/local/bin/wolf-selkies-kwin-entrypoint
 COPY --chmod=0755 docker/wolf-kde-steam.sh /usr/bin/steam
+COPY --chmod=0755 docker/wolf-steam-game.sh /usr/local/bin/wolf-steam-game
 COPY --chmod=0755 docker/steam-profile-init.sh /usr/local/bin/wolf-steam-profile-init
+COPY docker/steam-game-defaults.py /usr/local/share/wolf/steam-game-defaults.py
 COPY --chmod=0755 docker/steamos-session-select /usr/bin/steamos-session-select
 COPY docker/kde-raise-steam.js docker/steam-running-games.py docker/kde/steam.desktop docker/kde/steam-big-picture.desktop /usr/local/share/wolf/
-COPY docker/kde/heroic.desktop docker/kde/heroic-hdr.desktop /usr/local/share/wolf/
+COPY docker/kde/heroic.desktop /usr/local/share/wolf/
 USER ubuntu
 CMD ["/usr/local/bin/wolf-selkies-kwin-entrypoint"]

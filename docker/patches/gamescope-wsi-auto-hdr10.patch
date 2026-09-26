@@ -1,0 +1,57 @@
+diff --git a/layer/VkLayer_FROG_gamescope_wsi.cpp b/layer/VkLayer_FROG_gamescope_wsi.cpp
+--- a/layer/VkLayer_FROG_gamescope_wsi.cpp
++++ b/layer/VkLayer_FROG_gamescope_wsi.cpp
+@@ -1234,10 +1234,26 @@ namespace GamescopeWSILayer {
+         return pDispatch->CreateSwapchainKHR(device, pCreateInfo, pAllocator, pSwapchain);
+       }
+ 
++      // A D3D12 title can enable Advanced Color and select the HDR 10-bit
++      // format before Wine forwards its first SetColorSpace1 call. In an HDR
++      // Gamescope session this otherwise presents PQ values as sRGB until the
++      // user toggles HDR in the game. Upgrade only the HDR-capable 10-bit
++      // swapchain; 8-bit SDR swapchains and non-HDR sessions are unchanged.
++      const bool upgrade10BitSrgbToHdr = gamescopeSurface->shouldExposeHDR() &&
++        pCreateInfo->imageColorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR &&
++        (pCreateInfo->imageFormat == VK_FORMAT_A2B10G10R10_UNORM_PACK32 ||
++         pCreateInfo->imageFormat == VK_FORMAT_A2R10G10B10_UNORM_PACK32);
++      const VkColorSpaceKHR contentColorSpace = upgrade10BitSrgbToHdr
++        ? VK_COLOR_SPACE_HDR10_ST2084_EXT
++        : pCreateInfo->imageColorSpace;
++
++      if (upgrade10BitSrgbToHdr)
++        fprintf(stderr, "[Gamescope WSI] Upgrading HDR-session 10-bit sRGB swapchain to HDR10 PQ.\n");
++
+       // Only the colorspaces we expose in s_ExtraHDRSurfaceFormat2s count as
+       // HDR. Other non-sRGB colorspaces are still SDR content Wine can blit.
+-      const bool hdrColorspace = pCreateInfo->imageColorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT ||
+-                                  pCreateInfo->imageColorSpace == VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT;
++      const bool hdrColorspace = contentColorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT ||
++                                  contentColorSpace == VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT;
+       const bool canBypass = gamescopeSurface->canBypassXWayland(hdrColorspace);
+ 
+       VkSwapchainCreateInfoKHR swapchainInfo = *pCreateInfo;
+@@ -1297,6 +1313,6 @@ namespace GamescopeWSILayer {
+         minImageCount,
+         vkroots::helpers::enumString(pCreateInfo->imageFormat),
+-        vkroots::helpers::enumString(pCreateInfo->imageColorSpace),
++        vkroots::helpers::enumString(contentColorSpace),
+         canBypass ? "true" : "false");
+ 
+       // Check for VkFormat support and return VK_ERROR_INITIALIZATION_FAILED
+@@ -1319,6 +1335,6 @@ namespace GamescopeWSILayer {
+             gamescopeSurface->window,
+             vkroots::helpers::enumString(pCreateInfo->imageFormat),
+-            vkroots::helpers::enumString(pCreateInfo->imageColorSpace),
++            vkroots::helpers::enumString(contentColorSpace),
+             canBypass ? "true" : "false");
+ 
+           return VK_ERROR_INITIALIZATION_FAILED;
+@@ -1382,7 +1397,7 @@ namespace GamescopeWSILayer {
+         gamescopeSwapchainObject,
+         imageCount,
+         uint32_t(pCreateInfo->imageFormat),
+-        uint32_t(pCreateInfo->imageColorSpace),
++        uint32_t(contentColorSpace),
+         uint32_t(pCreateInfo->compositeAlpha),
+         uint32_t(pCreateInfo->preTransform),
+         uint32_t(pCreateInfo->clipped),

@@ -68,6 +68,76 @@ id = "user"
 name = "User"
 
 [[profiles.apps]]
+title = "Steam (KDE)"
+icon_png_path = "https://games-on-whales.github.io/wildlife/apps/steam/assets/icon.png"
+start_virtual_compositor = true
+start_audio_server = true
+support_hdr = true
+render_node = "/dev/dri/renderD128"
+
+[profiles.apps.runner]
+type = "docker"
+name = "WolfSteamKDE"
+image = "wolf-kde:hdr"
+mounts = ["/etc/wolf/profile-data/user/WolfSteam/.steam:/var/lib/wolf-shared-steam:rw"]
+env = [
+    "WOLF_KDE_ENABLE_HDR=1",
+    "WOLF_KDE_START_STEAM=1",
+    "WOLF_KDE_STEAM_MODE=big-picture",
+    "WOLF_KDE_GAMESCOPE_HDR=1",
+    "GOW_REQUIRED_DEVICES=/dev/input/* /dev/dri/* /dev/nvidia*",
+]
+devices = ["/dev/uinput:/dev/uinput:mrw"]
+ports = []
+state_folder = "profile-data/user/WolfSteamKDE"
+base_create_json = '''{
+  "Cmd": ["/usr/local/bin/wolf-selkies-kwin-entrypoint"],
+  "User": "0",
+  "HostConfig": {
+    "IpcMode": "host",
+    "CapAdd": ["SYS_ADMIN", "SYS_NICE", "SYS_PTRACE", "NET_RAW", "MKNOD", "NET_ADMIN"],
+    "SecurityOpt": ["seccomp=unconfined", "apparmor=steam"],
+    "Ulimits": [{"Name":"nofile", "Hard":10240, "Soft":10240}],
+    "Privileged": false,
+    "DeviceCgroupRules": ["c 13:* rmw", "c 244:* rmw"]
+  }
+}'''
+
+[[profiles.apps]]
+title = "KDE"
+icon_png_path = ""
+start_virtual_compositor = true
+start_audio_server = true
+support_hdr = true
+render_node = "/dev/dri/renderD128"
+
+[profiles.apps.runner]
+type = "docker"
+name = "WolfSelkiesKWin"
+image = "wolf-kde:hdr"
+mounts = ["/etc/wolf/profile-data/user/WolfSteam/.steam:/var/lib/wolf-shared-steam:rw"]
+env = [
+    "WOLF_KDE_ENABLE_HDR=1",
+    "WOLF_KDE_GAMESCOPE_HDR=1",
+    "GOW_REQUIRED_DEVICES=/dev/input/* /dev/dri/* /dev/nvidia*",
+]
+devices = ["/dev/uinput:/dev/uinput:mrw"]
+ports = []
+state_folder = "profile-data/user/WolfSelkiesKWin"
+base_create_json = '''{
+  "Cmd": ["/usr/local/bin/wolf-selkies-kwin-entrypoint"],
+  "User": "0",
+  "HostConfig": {
+    "IpcMode": "host",
+    "CapAdd": ["SYS_ADMIN", "SYS_NICE", "SYS_PTRACE", "NET_RAW", "MKNOD", "NET_ADMIN"],
+    "SecurityOpt": ["seccomp=unconfined", "apparmor=steam"],
+    "Ulimits": [{"Name":"nofile", "Hard":10240, "Soft":10240}],
+    "Privileged": false,
+    "DeviceCgroupRules": ["c 13:* rmw", "c 244:* rmw"]
+  }
+}'''
+
+[[profiles.apps]]
 title = "Firefox"
 icon_png_path = "https://games-on-whales.github.io/wildlife/apps/firefox/assets/icon.png"
 start_virtual_compositor = true
@@ -154,40 +224,6 @@ base_create_json = """
 }
 \
 """
-
-[[profiles.apps]]
-title = "KDE Plasma HDR"
-start_virtual_compositor = true
-support_hdr = true
-
-[profiles.apps.runner]
-type = "docker"
-name = "WolfSelkiesKWin"
-image = "wolf-kde:hdr"
-# The runner's home is persisted automatically by Wolf. No workstation path
-# or existing Steam installation is required; bootstrap is supplied by image.
-mounts = []
-devices = ["/dev/uinput:/dev/uinput:mrw"]
-ports = []
-env = [
-    "WOLF_KDE_ENABLE_HDR=1",
-    "WOLF_KDE_START_STEAM=1",
-    "WOLF_KDE_GAMESCOPE_HDR=1",
-    "WOLF_SDR_REFERENCE_WHITE=100",
-    "GOW_REQUIRED_DEVICES=/dev/input/* /dev/dri/* /dev/nvidia*",
-]
-base_create_json = '''{
-  "Cmd": ["/usr/local/bin/wolf-selkies-kwin-entrypoint"],
-  "User": "0",
-  "HostConfig": {
-    "IpcMode": "host",
-    "CapAdd": ["SYS_ADMIN", "SYS_NICE", "SYS_PTRACE", "NET_RAW", "MKNOD", "NET_ADMIN"],
-    "SecurityOpt": ["seccomp=unconfined", "apparmor=unconfined"],
-    "Ulimits": [{"Name":"nofile", "Hard":10240, "Soft":10240}],
-    "Privileged": false,
-    "DeviceCgroupRules": ["c 13:* rmw"]
-  }
-}'''
 
 [[profiles.apps]]
 title = "Pegasus"

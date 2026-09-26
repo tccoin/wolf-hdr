@@ -4,6 +4,11 @@
 Wolf UI is an application launcher and profile manager.
 It provides an intuitive interface for organizing, downloading and updating applications and set up cooperative lobbies.
 
+The Settings page also controls Wolf's global virtual HDR-display peak. This
+value is reported to HDR games independently of the nested KDE display
+calibration and game-level brightness controls. It takes effect for a fresh KDE
+desktop session.
+
 image:ROOT:wolf-ui-users.png[]
 
 == User Interface Overview
@@ -35,3 +40,12 @@ When you are running an application, you can instantly return to Wolf UI by:
 
 * pressing kbd:[Ctrl+ALT+SHIFT+W] on your keyboard
 * pressing kbd:[START + UP + RB] on a joypad
+
+== Stop a Running Application Hotkey
+
+Disconnecting a Moonlight client keeps the app alive for reconnection. To explicitly stop that app from a reconnected client, use:
+
+* kbd:[Ctrl+ALT+SHIFT+A] on a keyboard
+* kbd:[START + DOWN + RB] on a joypad
+
+This stops the current app and stream but keeps the Wolf host service running. The next Moonlight launch starts a fresh Wolf UI.
