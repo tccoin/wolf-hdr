@@ -1,0 +1,116 @@
+diff --git a/dlls/winepulse.drv/pulse.c b/dlls/winepulse.drv/pulse.c
+index 00000000000..11111111111 100644
+--- a/dlls/winepulse.drv/pulse.c
++++ b/dlls/winepulse.drv/pulse.c
+@@ -826,6 +826,7 @@ static BOOL is_dualsense_speaker_sink(const PhysDevice *dev);
+ static char *pulse_find_shared_sony_speaker_survivor(const PhysDevice *removed,
+         struct list *active, struct list *added);
+ static void pulse_retarget_dualsense_mono_streams(const char *preferred);
++static BOOL use_raw_dualsense_haptic_target(void);
+ static BOOL use_pipewire_dualsense_haptic_target(void);
+ static BOOL use_dualsense_split_audio(void);
+ static void pulse_retarget_dualsense_haptic_streams(const char *target);
+@@ -854,7 +855,7 @@ static NTSTATUS pulse_get_endpoint_ids(void *args)
+     PhysDevice *dev, *dev_next;
+     BOOL delta = params->delta;
+     BOOL find_dualsense_haptic_alsa = FALSE;
+-    BOOL retarget_haptic = use_pipewire_dualsense_haptic_target();
++    BOOL retarget_haptic = use_raw_dualsense_haptic_target();
+     BOOL refresh_render_after_capture = FALSE;
+     char *dualsense_mono_target = NULL;
+     char *dualsense_haptic_target = NULL;
+@@ -1213,7 +1214,7 @@ static BOOL pulse_stream_valid(struct pulse_stream *stream)
+     if (stream->dualsense_mono_registered)
+         return TRUE;
+ 
+-    if (use_pipewire_dualsense_haptic_target() && !stream->stream &&
++    if (use_raw_dualsense_haptic_target() && !stream->stream &&
+             stream->dualsense_haptic_registered)
+         return stream->dataflow == eRender;
+ 
+@@ -1645,6 +1646,22 @@ static BOOL use_pipewire_dualsense_haptic_target(void)
+             InterlockedCompareExchange(&g_sony_windows_audio_mode, 0, 0);
+ }
+ 
++/* Wolf captures the ScePad rear-channel PCM from its named PulseAudio sink.
++ * A local PipeWire/ALSA endpoint bypasses the server entirely, so streamed
++ * sessions explicitly keep ScePad on PulseAudio even if a raw endpoint is
++ * discovered during startup or hotplug. */
++static BOOL force_wolf_scepad_pulse_route(void)
++{
++    const char *env = getenv("WOLF_SCEPAD_FORCE_PULSE");
++
++    return env && env[0] == '1' && !env[1];
++}
++
++static BOOL use_raw_dualsense_haptic_target(void)
++{
++    return use_pipewire_dualsense_haptic_target() && !force_wolf_scepad_pulse_route();
++}
++
+ static BOOL use_dualsense_split_audio(void)
+ {
+     const char *env = getenv("PROTON_DUALSENSE_SPLIT_AUDIO");
+@@ -2261,7 +2278,7 @@ static BOOL pulse_refresh_devices(EDataFlow flow)
+     pa_context *ctx;
+     pa_operation *o;
+     BOOL find_dualsense_haptic_alsa = FALSE;
+-    BOOL retarget_haptic = flow == eRender && use_pipewire_dualsense_haptic_target();
++    BOOL retarget_haptic = flow == eRender && use_raw_dualsense_haptic_target();
+     char *dualsense_mono_target = NULL;
+     char *dualsense_haptic_target = NULL;
+     char *dualsense_haptic_alsa_path = NULL;
+@@ -3662,7 +3679,7 @@ static char *find_dualsense_haptic_alsa_path(void)
+     BOOL found = FALSE, selected = FALSE;
+     int fd;
+ 
+-    if (!use_pipewire_dualsense_haptic_target())
++    if (!use_raw_dualsense_haptic_target())
+         return FALSE;
+ 
+     for (i = 0; i < 64; ++i)
+@@ -4165,5 +4182,5 @@ static BOOL pulse_haptic_refresh_path(struct pulse_stream *stream)
+ {
+-    if (!use_pipewire_dualsense_haptic_target())
++    if (!use_raw_dualsense_haptic_target())
+     {
+         if (stream->haptic_pcm && stream->haptic_hotplug_generation == g_haptic_hotplug_generation)
+             return TRUE;
+@@ -4416,7 +4433,7 @@ static void pulse_haptic_write(struct pulse_stream *stream)
+     split_speaker = use_dualsense_split_audio() && pulse_split_speaker_ready(stream);
+     /* Automatic mode can be selected after winebus initialized the HID, so
+      * retain and route AUX1 here when no private speaker stream owns it. */
+-    raw_speaker = use_pipewire_dualsense_haptic_target() && !split_speaker &&
++    raw_speaker = use_raw_dualsense_haptic_target() && !split_speaker &&
+             stream->ss.channels >= 2;
+     if (stream->ss.format == PA_SAMPLE_FLOAT32LE)
+     {
+@@ -4560,6 +4577,6 @@ static NTSTATUS pulse_create_stream(void *args)
+      * so retrieve its hidden PipeWire parent separately instead of losing it
+      * to short-circuit evaluation. */
+-    if (use_pipewire_dualsense_haptic_target() && haptic_candidate && !haptic_target)
++    if (use_raw_dualsense_haptic_target() && haptic_candidate && !haptic_target)
+         haptic_target = get_dualsense_haptic_target(params->device, stream);
+     if (haptic_candidate && pulse_get_device_container_id(params->device,
+             &stream->sony_controller_container_id))
+@@ -4584,7 +4601,11 @@ static NTSTATUS pulse_create_stream(void *args)
+         stream->map.map[2] = PA_CHANNEL_POSITION_REAR_LEFT;
+         stream->map.map[3] = PA_CHANNEL_POSITION_REAR_RIGHT;
+         TRACE("Using standard quad channel map for DualSense haptic stream.\n");
+-        if (use_pipewire_dualsense_haptic_target() && haptic_target)
++        if (force_wolf_scepad_pulse_route())
++        {
++            TRACE("Forcing Wolf ScePad haptic stream through PulseAudio.\n");
++        }
++        else if (use_raw_dualsense_haptic_target() && haptic_target)
+         {
+             haptic_alsa_path = make_pipewire_dualsense_haptic_path(haptic_target);
+             TRACE("Routing DualSense stream from %s through ALSA PipeWire target %s.\n",
+@@ -4752,6 +4773,6 @@ static NTSTATUS pulse_create_stream(void *args)
+         }
+         if (SUCCEEDED(hr) && haptic_candidate &&
+-                use_pipewire_dualsense_haptic_target())
++                use_raw_dualsense_haptic_target())
+         {
+             list_add_tail(&dualsense_haptic_streams, &stream->dualsense_haptic_entry);
+             stream->dualsense_haptic_registered = TRUE;

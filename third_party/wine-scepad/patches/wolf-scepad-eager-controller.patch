@@ -1,0 +1,15 @@
+diff --git a/dlls/winebus.sys/main.c b/dlls/winebus.sys/main.c
+--- a/dlls/winebus.sys/main.c
++++ b/dlls/winebus.sys/main.c
+@@ -839,8 +839,11 @@ static DEVICE_OBJECT *bus_create_hid_device(struct device_desc *desc, UINT64 un
+     else
+         list_add_tail(&device_list, &ext->entry);
+ 
+     RtlLeaveCriticalSection(&device_list_cs);
+ 
++    /* Audio endpoints are enumerated before the first input report. */
++    sony_active_controller_publish(ext);
++
+     TRACE("created device %p/%#I64x\n", device, unix_device);
+     return device;
+ }

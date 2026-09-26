@@ -1,0 +1,14 @@
+diff --git a/dlls/winepulse.drv/pulse.c b/dlls/winepulse.drv/pulse.c
+--- a/dlls/winepulse.drv/pulse.c
++++ b/dlls/winepulse.drv/pulse.c
+@@ -1614,7 +1614,9 @@ static BOOL is_dualsense_speaker_sink(const PhysDevice *dev)
+ {
+     return is_dualshock_speaker_sink(dev) ||
+-            (dev->flow == eRender && strstr(dev->pulse_name, "Speaker__sink")
++            (dev->flow == eRender &&
++            (strstr(dev->pulse_name, "Speaker__sink") ||
++             !strcmp(dev->pulse_name, "control_dualsense_audio"))
+             && (is_dualsense_audio_device(dev)
+                 || (strstr(dev->pulse_name, "alsa_output.usb-Sony_Interactive_Entertainment_")
+                     && strstr(dev->pulse_name, "Wireless_Controller"))));
+ }

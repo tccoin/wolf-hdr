@@ -1,0 +1,22 @@
+diff --git a/dlls/winepulse.drv/pulse.c b/dlls/winepulse.drv/pulse.c
+--- a/dlls/winepulse.drv/pulse.c
++++ b/dlls/winepulse.drv/pulse.c
+@@ -1894,9 +1894,18 @@ static BOOL pulse_set_endpoint_id(PhysDevice *dev, struct list *current)
+     PhysDevice *canonical;
+     const char *sony_base;
+     char *existing;
++    GUID active_controller;
+     unsigned int generation;
+     size_t len;
+ 
++    /* Wolf's ScePad endpoint is virtual and has no sysfs parent.  Bind it to
++     * the currently active virtual DualSense while Wine enumerates audio
++     * devices, so games that require the HID/audio ContainerId relationship
++     * see one controller rather than an unrelated USB audio device. */
++    if (!strcmp(dev->pulse_name, "control_dualsense_audio") &&
++            pulse_get_active_sony_controller(&active_controller))
++        dev->container_id = active_controller;
++
+     if ((sony_base = sony_render_endpoint_base(dev)))
+     {
+         if ((existing = find_existing_sony_physical_endpoint(dev, sony_base, current)))

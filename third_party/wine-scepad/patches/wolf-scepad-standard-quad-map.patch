@@ -1,0 +1,26 @@
+diff --git a/dlls/winepulse.drv/pulse.c b/dlls/winepulse.drv/pulse.c
+--- a/dlls/winepulse.drv/pulse.c
++++ b/dlls/winepulse.drv/pulse.c
+@@ -4578,11 +4578,18 @@ static NTSTATUS pulse_create_stream(void *args)
+     dualsense_mono_candidate = !haptic_candidate && pulse_stream_dualsense_mono_format(stream)
+             && string_contains_dualsense_name(params->device);
+     if (haptic_candidate)
+     {
+-        stream->map.map[0] = PA_CHANNEL_POSITION_AUX0;
+-        stream->map.map[1] = PA_CHANNEL_POSITION_AUX1;
+-        stream->map.map[2] = PA_CHANNEL_POSITION_AUX2;
+-        stream->map.map[3] = PA_CHANNEL_POSITION_AUX3;
++        /* Wwise opens the ScePad endpoint as a four-channel WASAPI render
++         * stream.  The Wolf Pulse sink uses the standard quad layout; marking
++         * this stream AUX0..AUX3 makes PulseAudio find no matching positions
++         * and silently mix every haptic sample to zero.  Preserve the native
++         * WAVEFORMATEXTENSIBLE quad order instead: FL/FR are padding and
++         * RL/RR carry the controller's left/right actuator PCM. */
++        stream->map.map[0] = PA_CHANNEL_POSITION_FRONT_LEFT;
++        stream->map.map[1] = PA_CHANNEL_POSITION_FRONT_RIGHT;
++        stream->map.map[2] = PA_CHANNEL_POSITION_REAR_LEFT;
++        stream->map.map[3] = PA_CHANNEL_POSITION_REAR_RIGHT;
++        TRACE("Using standard quad channel map for DualSense haptic stream.\n");
+         if (use_pipewire_dualsense_haptic_target() && haptic_target)
+         {
+             haptic_alsa_path = make_pipewire_dualsense_haptic_path(haptic_target);
