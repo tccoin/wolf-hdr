@@ -45,13 +45,20 @@ struct AudioMode {
 };
 
 struct AudioDevice {
-  std::string_view sink_name;
+  // The sink request is queued onto PulseAudio's event loop, so it must own
+  // its name instead of borrowing a session-local temporary string.
+  std::string sink_name;
   AudioMode mode;
 };
 
 struct VSink {
   AudioDevice device;
-  boost::promise<unsigned int> sink_idx;
+  // `create_virtual_sink()` is asynchronous.  A shared future lets both the
+  // stream producer and later teardown wait for the same module-load result.
+  // Starting pulsesrc before this becomes ready races the Pulse server and
+  // makes a newly launched tile exit with "No such entity".
+  boost::promise<unsigned int> sink_idx_promise;
+  boost::shared_future<unsigned int> sink_idx;
 };
 
 /**

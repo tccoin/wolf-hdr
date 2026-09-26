@@ -1,0 +1,20 @@
+diff --git a/src/uhid/joypad_ps5.cpp b/src/uhid/joypad_ps5.cpp
+index 96a5a92..c7e1ac4 100644
+--- a/src/uhid/joypad_ps5.cpp
++++ b/src/uhid/joypad_ps5.cpp
+@@ -179,7 +179,12 @@ static void on_uhid_event(std::shared_ptr<PS5JoypadState> state, uhid_event ev,
+       auto right_array_start = std::begin(report.right_trigger_effect);
+       auto right_array_end = std::end(report.right_trigger_effect);
+-      // We have to cache these values because these flags will be set as long as the effect is active
+-      uint32_t left_trigger_hash = std::accumulate(left_array_start, left_array_end, 0ul);
+-      uint32_t right_trigger_hash = std::accumulate(right_array_start, right_array_end, 0ul);
++      // We have to cache these values because these flags will be set as long as the effect is active.
++      // The effect type is meaningful even when all of its ten parameters are zero
++      // (CONTROL emits exactly that form for its first adaptive-trigger setup),
++      // so hashing only the data would suppress that valid initial event.
++      uint32_t left_trigger_hash = std::accumulate(left_array_start, left_array_end,
++                                                    static_cast<uint32_t>(report.left_trigger_effect_type) << 8);
++      uint32_t right_trigger_hash = std::accumulate(right_array_start, right_array_end,
++                                                     static_cast<uint32_t>(report.right_trigger_effect_type) << 8);
+       if ((left_trigger && state->last_left_trigger_event != left_trigger_hash) ||
+           (right_trigger && state->last_right_trigger_event != right_trigger_hash)) {

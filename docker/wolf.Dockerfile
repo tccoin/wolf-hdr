@@ -106,6 +106,7 @@ RUN dnf install -y --allowerasing \
     && dnf clean all
 
 COPY docker/supervisord.conf /etc/supervisord.conf
+COPY docker/pulse/wolf-scepad.pa /etc/pulse/wolf-scepad.pa
 
 ENV GST_PLUGIN_PATH=/usr/local/lib/x86_64-linux-gnu/gstreamer-1.0/
 # Copying out our custom compositor from the build stage. The gst-wayland-display

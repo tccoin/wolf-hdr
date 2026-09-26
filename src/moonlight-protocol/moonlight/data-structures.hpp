@@ -32,6 +32,7 @@ struct App {
 // Client feature flags for x-ml-general.featureFlags SDP attribute
 #define ML_FF_FEC_STATUS 0x01    // Client sends SS_FRAME_FEC_STATUS for frame losses
 #define ML_FF_SESSION_ID_V1 0x02 // Client supports X-SS-Ping-Payload and X-SS-Connect-Data
+#define ML_FF_DUALSENSE_HAPTIC_AUDIO 0x04 // Client accepts DualSense haptic audio control packets
 
 struct SS_PING {
   std::array<char, 16> payload;

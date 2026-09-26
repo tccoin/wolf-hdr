@@ -100,6 +100,9 @@ void leave_lobby(const std::shared_ptr<events::EventBusType> &ev_bus,
   ev_bus->fire_event(immer::box<events::SwitchStreamProducerEvents>{
       events::SwitchStreamProducerEvents{.session_id = session.session_id,
                                          .interpipe_src_id = std::to_string(session.session_id)}});
+  // A producer hand-off changes the encoded frame-reference chain. Force a
+  // keyframe so Moonlight does not continue displaying the last KDE frame.
+  ev_bus->fire_event(immer::box<events::IDRRequestEvent>{events::IDRRequestEvent{.session_id = session.session_id}});
 
   if (lobby.connected_sessions->load()->size() == 0) {
     if (!lobby.multi_user) {
@@ -127,7 +130,7 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
         // Native mode requires both the feedback-resource lifetime fix and
         // KWin's PQ output patch. The old crash was in Wayland resource dispatch,
         // not NVIDIA's 10-bit importer (verified with a faulting-thread trace).
-        const bool kde_compat_lobby = lobby_settings->name == "KDE Plasma HDR Experimental" &&
+        const bool kde_compat_lobby = lobby_settings->name == "KDE" &&
                                       std::string(utils::get_env("WOLF_KDE_NATIVE_HDR", "0")) != "1";
         const bool restrict_hdr_dmabufs = video_settings.restrict_hdr_dmabufs || kde_compat_lobby;
         // The compatibility path maps 8-bit SDR to the same P010 transport.
@@ -147,6 +150,40 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
                           .runner = lobby_settings->runner});
         app_state->lobbies->update(
             [lobby](const immer::vector<events::Lobby> &lobbies) { return lobbies.push_back(*lobby); });
+
+        // Create the lobby's audio endpoint before the runner can connect to
+        // PulseAudio.  The runner startup is driven by the Wayland-ready
+        // continuation below and may otherwise win the race after a Wolf
+        // restart: applications get routed to the lobby sink, but its
+        // GStreamer monitor producer has never been created, resulting in a
+        // perfectly healthy-looking "Null Output" with no streamed audio.
+        {
+          logs::log(logs::debug, "[LOBBY] Create audio virtual sink");
+          auto pulse_sink_name = fmt::format("{}{}", VIRTUAL_SINK_PREFIX, lobby->id);
+          if (audio_server && audio_server->server) {
+            auto channel_count = lobby_settings->audio_settings.channel_count;
+            auto v_device = audio::create_virtual_sink(
+                audio_server->server,
+                audio::AudioDevice{.sink_name = pulse_sink_name, .mode = state::get_audio_mode(channel_count, true)});
+
+            lobby->audio_sink->store(v_device);
+
+            // run_pipeline() owns a GLib main loop, so it must not run on the
+            // lobby setup handler. Starting it synchronously prevents the
+            // Wayland producer and KDE runner from ever being created. Keep
+            // the audio endpoint creation ahead of those steps, but wait for
+            // Pulse from the producer thread before opening its monitor.
+            std::thread([lobby, audio_server = audio_server->server, v_device, ev_bus, channel_count]() {
+              v_device->sink_idx.get();
+              auto sink_name = fmt::format("{}{}.monitor", VIRTUAL_SINK_PREFIX, lobby->id);
+              streaming::start_audio_producer(lobby->id,
+                                              ev_bus,
+                                              channel_count,
+                                              sink_name,
+                                              audio::get_server_name(audio_server));
+            }).detach();
+          }
+        }
 
         { // Start Wayland compositor and Gstreamer producer pipeline
           logs::log(logs::debug, "[LOBBY] Create wayland compositor");
@@ -235,28 +272,6 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
               });
         }
 
-        { // Create audio virtual sink
-          logs::log(logs::debug, "[LOBBY] Create audio virtual sink");
-          auto pulse_sink_name = fmt::format("{}{}", VIRTUAL_SINK_PREFIX, lobby->id);
-          if (audio_server && audio_server->server) {
-            auto channel_count = lobby_settings->audio_settings.channel_count;
-            auto v_device = audio::create_virtual_sink(
-                audio_server->server,
-                audio::AudioDevice{.sink_name = pulse_sink_name, .mode = state::get_audio_mode(channel_count, true)});
-
-            lobby->audio_sink->store(v_device);
-
-            // Start Gstreamer producer pipeline
-            std::thread([lobby, audio_server = audio_server->server, ev_bus, channel_count]() {
-              auto sink_name = fmt::format("{}{}.monitor", VIRTUAL_SINK_PREFIX, lobby->id);
-              streaming::start_audio_producer(lobby->id,
-                                              ev_bus,
-                                              channel_count,
-                                              sink_name,
-                                              audio::get_server_name(audio_server));
-            }).detach();
-          }
-        }
       }));
 
   // When a Moonlight client joins a lobby
@@ -277,7 +292,29 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
         }
         logs::log(logs::info, "[LOBBY] Session {} joining lobby {}", session->session_id, lobby->id);
 
-        if (!lobby->multi_user && lobby->connected_sessions->load()->size() >= 1) {
+        const auto connected_sessions = lobby->connected_sessions->load();
+        bool already_connected = false;
+        for (const auto &connected_session : *connected_sessions) {
+          if (*connected_session == std::to_string(session->session_id)) {
+            already_connected = true;
+            break;
+          }
+        }
+
+        // Keep duplicate joins idempotent. Normal stream pauses leave the
+        // lobby so Wolf UI regains its input route; this only protects against
+        // repeated API requests while a lobby is already active.
+        if (already_connected) {
+          lobby->empty_session_generation->fetch_add(1);
+          logs::log(logs::info,
+                    "[LOBBY] Session {} resumed lobby {}; preserving input device identities",
+                    session->session_id,
+                    lobby->id);
+          join_lobby_event->error_message.get()->set_value("");
+          return;
+        }
+
+        if (!lobby->multi_user && connected_sessions->size() >= 1) {
           logs::log(logs::error, "[LOBBY] Lobby {} is full", lobby->id);
           join_lobby_event->error_message.get()->set_value("Lobby is full");
           return;
@@ -337,6 +374,8 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
         // Switch audio/video gstreamer stream producers
         app_state->event_bus->fire_event(immer::box<events::SwitchStreamProducerEvents>{
             events::SwitchStreamProducerEvents{.session_id = session->session_id, .interpipe_src_id = lobby->id}});
+        app_state->event_bus->fire_event(
+            immer::box<events::IDRRequestEvent>{events::IDRRequestEvent{.session_id = session->session_id}});
         join_lobby_event->error_message.get()->set_value("");
       }));
 
@@ -489,6 +528,25 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
       [=](const immer::box<events::ClientWolfUIComboEvent> &event) {
         logs::log(logs::info, "Detected WolfUI combo for session {}", event->session_id);
         on_moonlight_session_over(event->session_id);
+      }));
+
+  // Unlike a transient client disconnect, this is an unambiguous request to
+  // terminate the current app and stream. Leave the Wolf host itself alive;
+  // the next Moonlight launch will create a fresh Wolf UI session.
+  handlers.push_back(app_state->event_bus->register_handler<immer::box<events::ClientStopLobbyComboEvent>>(
+      [=](const immer::box<events::ClientStopLobbyComboEvent> &event) {
+        const auto lobbies = app_state->lobbies->load();
+        if (const auto lobby = state::get_lobby_by_connected_session(lobbies, std::to_string(event->session_id))) {
+          logs::log(logs::info, "Detected explicit stream stop for session {}; stopping lobby {}", event->session_id, lobby->id);
+          app_state->event_bus->fire_event(
+              immer::box<events::StopLobbyEvent>{events::StopLobbyEvent{.lobby_id = lobby->id}});
+        }
+        app_state->event_bus->fire_event(
+            immer::box<events::StopStreamEvent>{events::StopStreamEvent{.session_id = event->session_id}});
+        app_state->running_sessions->update([session_id = event->session_id](const immer::vector<events::StreamSession> &sessions) {
+          const auto session = state::get_session_by_id(sessions, session_id);
+          return session ? state::remove_session(sessions, session.value()) : sessions;
+        });
       }));
 
   return handlers.persistent();

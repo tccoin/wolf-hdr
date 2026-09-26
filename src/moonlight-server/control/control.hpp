@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <chrono>
 #include <enet/enet.h>
 #include <events/events.hpp>
@@ -28,6 +29,10 @@ std::shared_ptr<ENetPeer> to_shared_ptr(ENetPeer *peer);
 bool encrypt_and_send(std::string_view payload,
                       std::string_view aes_key,
                       immer::box<std::shared_ptr<ENetPeer>> connected_client);
+
+// Called from the PulseAudio callback.  The control thread owns encryption and
+// ENet I/O, so this only queues one 32-frame stereo, 3 kHz haptic packet.
+void queue_dualsense_haptic_audio(std::string session_id, std::array<std::int8_t, 64> pcm);
 
 bool init();
 

@@ -63,12 +63,13 @@ using PairedClientList = immer::vector<immer::box<wolf::config::PairedClient>>;
 using ProfilesList = immer::vector<immer::box<events::Profile>>;
 
 /**
- * Small, safe-to-change service settings. Unlike encoder and compositor
- * configuration these are consulted at the time an action is taken, so they
- * can be updated from Wolf UI without restarting an active stream.
+ * Small service settings persisted from Wolf UI. The disconnect grace period
+ * is live; HDR display metadata is used by newly created color-management
+ * clients and therefore takes effect on the next desktop/compositor session.
  */
 struct RuntimeSettings {
   int single_player_disconnect_grace_seconds = 10 * 60;
+  int hdr_peak_nits = 1000;
 };
 
 enum Encoder {

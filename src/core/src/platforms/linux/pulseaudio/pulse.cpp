@@ -149,12 +149,18 @@ void queue_op(const std::shared_ptr<Server> &server, const std::function<void()>
 }
 
 std::shared_ptr<VSink> create_virtual_sink(const std::shared_ptr<Server> &server, const AudioDevice &device) {
-
-  auto vsink = std::make_shared<VSink>(VSink{.device = device, .sink_idx = boost::promise<unsigned int>()});
+  auto vsink = std::make_shared<VSink>();
+  vsink->device = device;
+  vsink->sink_idx = vsink->sink_idx_promise.get_future().share();
 
   queue_op(server, [server, vsink]() {
     auto device = vsink->device;
-    auto channel_spec = fmt::format("rate={} sink_name={} channels={} channel_map={}",
+    // PulseAudio parses sink_properties itself.  A literal space in the
+    // description is treated as a second (invalid) property and makes
+    // module-null-sink reject the request.  Keep this parser-safe label so
+    // every session gets a real monitor source instead of a failed stream.
+    auto channel_spec = fmt::format("rate={} sink_name={} channels={} channel_map={} "
+                                    "sink_properties=\"device.description=Wolf_Stream_Audio\"",
                                     device.mode.sample_rate,
                                     device.sink_name,
                                     device.mode.channels,
@@ -166,7 +172,7 @@ std::shared_ptr<VSink> create_virtual_sink(const std::shared_ptr<Server> &server
         [](pa_context *c, uint32_t idx, void *data) {
           auto result = (VSink *)data;
           logs::log(logs::debug, "[PULSE] Created virtual sink: {}", idx);
-          result->sink_idx.set_value(idx);
+          result->sink_idx_promise.set_value(idx);
         },
         vsink.get());
     pa_operation_unref(operation);
@@ -181,7 +187,7 @@ void delete_virtual_sink(const std::shared_ptr<Server> &server, const std::share
 
     auto operation = pa_context_unload_module(
         server->ctx,
-        vsink->sink_idx.get_future().get(),
+        vsink->sink_idx.get(),
         [](pa_context *c, int status, void *data) {
           auto result = (boost::promise<int> *)data;
           result->set_value(status);

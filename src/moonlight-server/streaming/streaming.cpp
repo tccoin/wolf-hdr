@@ -1,6 +1,8 @@
 #include "platforms/hw.hpp"
 
+#include <algorithm>
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <control/control.hpp>
 #include <core/batched_send.hpp>
@@ -105,8 +107,32 @@ static void replace_all(std::string &value, std::string_view from, std::string_v
   }
 }
 
+static int hdr_peak_nits() {
+  const std::string value = utils::get_env("WOLF_HDR_PEAK_NITS", "1000");
+  int peak = 1000;
+  const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), peak);
+  if (error != std::errc{} || end != value.data() + value.size() || peak < 100 || peak > 10000) {
+    return 1000;
+  }
+  return peak;
+}
+
+static std::string hdr10_static_metadata_caps() {
+  const int peak = hdr_peak_nits();
+  // Keep MaxFALL conservative for OLED/mini-LED displays while ensuring it
+  // never exceeds the configured mastering/MaxCLL peak.
+  const int max_fall = std::min(400, peak);
+  return fmt::format(
+      ", mastering-display-info=(string)35400:14600:8500:39850:6550:2300:15635:16450:{}:1, "
+      "content-light-level=(string){}:{}",
+      static_cast<long long>(peak) * 10000,
+      peak,
+      max_fall);
+}
+
 std::string prepare_video_pipeline(std::string pipeline, bool hdr_requested) {
   if (hdr_requested) {
+    const auto hdr_metadata = hdr10_static_metadata_caps();
     // A live HDR session starts on Wolf UI's GL/RGB10A2 producer, then may
     // join a KDE lobby whose producer is CUDA/P010.  Both represent HDR10,
     // but their Gst memory/caps are intentionally different.  Keep the
@@ -131,11 +157,7 @@ std::string prepare_video_pipeline(std::string pipeline, bool hdr_requested) {
       replace_all(pipeline, "cudaupload ! cudaconvertscale add-borders=true ! ", "");
       replace_all(pipeline, "format=NV12", "format=P010_10LE");
       replace_all(pipeline, "colorimetry={color_space}", "colorimetry=bt2100-pq");
-      replace_all(pipeline,
-                  "format=P010_10LE",
-                  "format=P010_10LE, "
-                  "mastering-display-info=(string)35400:14600:8500:39850:6550:2300:15635:16450:10000000:1, "
-                  "content-light-level=(string)1000:400");
+      replace_all(pipeline, "format=P010_10LE", fmt::format("format=P010_10LE{}", hdr_metadata));
       replace_all(pipeline, "profile=main,", "profile=main-10,");
       return pipeline;
     }
@@ -145,11 +167,7 @@ std::string prepare_video_pipeline(std::string pipeline, bool hdr_requested) {
     // Feed a complete HDR10 contract into NVENC. nvh265enc copies these raw
     // caps into the HEVC VUI and static HDR SEI; relying on metadata inherited
     // from the producer is fragile across the interpipe boundary.
-    replace_all(pipeline,
-                "format=P010_10LE",
-                "format=P010_10LE, "
-                "mastering-display-info=(string)35400:14600:8500:39850:6550:2300:15635:16450:10000000:1, "
-                "content-light-level=(string)1000:400");
+    replace_all(pipeline, "format=P010_10LE", fmt::format("format=P010_10LE{}", hdr_metadata));
   } else {
     // Keep the SDR path exactly on Wolf's established interpipe contract.
     // These restrictions were introduced to freeze the HDR UI-to-app handoff,
@@ -633,13 +651,14 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
                            std::string client_ip,
                            unsigned short client_port,
                            std::shared_ptr<immer::atom<gst_video_context::gst_context_ptr>> video_context,
-                           std::shared_ptr<udp::socket> video_socket) {
+                           std::shared_ptr<udp::socket> video_socket,
+                           const std::string &initial_producer_id) {
   auto [color_range, color_space] = get_color_params(video_session);
 
   auto pipeline_template = prepare_video_pipeline(video_session->gst_pipeline, video_session->hdr_requested);
   auto pipeline = fmt::format(
       fmt::runtime(pipeline_template),
-      fmt::arg("session_id", video_session->session_id),
+      fmt::arg("session_id", initial_producer_id),
       fmt::arg("width", video_session->display_mode.width),
       fmt::arg("height", video_session->display_mode.height),
       fmt::arg("fps", video_session->display_mode.refreshRate),
@@ -770,10 +789,20 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
               }
             });
 
+        auto stop_transport_handler = event_bus->register_handler<immer::box<events::StopClientTransportEvent>>(
+            [sess_id = video_session->session_id,
+             pipeline](const immer::box<events::StopClientTransportEvent> &ev) {
+              if (ev->session_id == sess_id) {
+                logs::log(logs::debug, "[GSTREAMER] Stopping client video transport: {}", sess_id);
+                gst_element_send_event(pipeline.get(), gst_event_new_eos());
+              }
+            });
+
         return immer::array<immer::box<events::EventBusHandlers>>{std::move(idr_handler),
                                                                   std::move(pause_handler),
                                                                   std::move(switch_producer_handler),
-                                                                  std::move(stop_handler)};
+                                                                  std::move(stop_handler),
+                                                                  std::move(stop_transport_handler)};
       },
       [session_id = video_session->session_id, event_bus, failure_reported](const std::string &error) {
         if (!failure_reported->exchange(true)) {
@@ -795,10 +824,11 @@ void start_streaming_audio(immer::box<events::AudioSession> audio_session,
                            unsigned short client_port,
                            std::shared_ptr<udp::socket> audio_socket,
                            const std::string &sink_name,
-                           const std::string &server_name) {
+                           const std::string &server_name,
+                           const std::string &initial_producer_id) {
   auto pipeline = fmt::format(
       fmt::runtime(audio_session->gst_pipeline),
-      fmt::arg("session_id", audio_session->session_id),
+      fmt::arg("session_id", initial_producer_id),
       fmt::arg("channels", audio_session->audio_mode.channels),
       fmt::arg("bitrate", audio_session->audio_mode.bitrate),
       // TODO: opusenc hardcodes those two
@@ -880,9 +910,18 @@ void start_streaming_audio(immer::box<events::AudioSession> audio_session,
               }
             });
 
+        auto stop_transport_handler = event_bus->register_handler<immer::box<events::StopClientTransportEvent>>(
+            [session_id, pipeline](const immer::box<events::StopClientTransportEvent> &ev) {
+              if (ev->session_id == session_id) {
+                logs::log(logs::debug, "[GSTREAMER] Stopping client audio transport: {}", session_id);
+                gst_element_send_event(pipeline.get(), gst_event_new_eos());
+              }
+            });
+
         return immer::array<immer::box<events::EventBusHandlers>>{std::move(pause_handler),
                                                                   std::move(switch_producer_handler),
-                                                                  std::move(stop_handler)};
+                                                                  std::move(stop_handler),
+                                                                  std::move(stop_transport_handler)};
       },
       [session_id = audio_session->session_id, event_bus, failure_reported](const std::string &error) {
         if (!failure_reported->exchange(true)) {

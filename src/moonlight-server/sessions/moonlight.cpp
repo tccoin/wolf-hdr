@@ -11,6 +11,20 @@ namespace wolf::core::sessions {
 
 using session_devices = immer::map<std::string /* session_id */, std::shared_ptr<events::devices_atom_queue>>;
 
+// A reconnect creates fresh client RTP pipelines after the lobby has already
+// been joined.  Start those pipelines on that lobby's producer immediately:
+// dispatching SwitchStreamProducerEvents earlier is racy because the new
+// pipelines have not registered their handlers yet, leaving Moonlight stuck
+// on the Wolf UI producer.
+static std::string current_producer_id(
+    const std::shared_ptr<immer::atom<immer::vector<events::Lobby>>> &lobbies,
+    std::size_t session_id) {
+  if (const auto lobby = state::get_lobby_by_connected_session(lobbies->load(), std::to_string(session_id))) {
+    return lobby->id;
+  }
+  return std::to_string(session_id);
+}
+
 /**
  * Will stop the execution until an event of type RTPPingType is triggered
  * and the signature is matching the input `sess`.
@@ -154,7 +168,10 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
                                  .mode = state::get_audio_mode(session->audio_channel_count, true)});
           session->audio_sink->store(v_device);
 
-          std::thread([session, audio_server = audio_server->server]() {
+          std::thread([session, audio_server = audio_server->server, v_device]() {
+            // module-null-sink is loaded asynchronously.  Do not construct
+            // pulsesrc until Pulse has acknowledged its monitor source.
+            v_device->sink_idx.get();
             auto sink_name = fmt::format("{}{}.monitor", VIRTUAL_SINK_PREFIX, session->session_id);
             streaming::start_audio_producer(std::to_string(session->session_id),
                                             session->event_bus,
@@ -263,9 +280,10 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
 
   handlers.push_back(app_state->event_bus->register_handler<immer::box<events::VideoSession>>(
       [ev_bus = app_state->event_bus,
-       gst_context = app_state->gst_context](const immer::box<events::VideoSession> &sess) {
+       gst_context = app_state->gst_context,
+       lobbies = app_state->lobbies](const immer::box<events::VideoSession> &sess) {
         // Start a thread that will wait for the RTP ping event
-        std::thread([sess, ev_bus, gst_context]() {
+        std::thread([sess, ev_bus, gst_context, lobbies]() {
           auto ping_ev = wait_for_ping<events::RTPVideoPingEvent>(ev_bus, sess);
 
           // Start streaming
@@ -274,14 +292,15 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
                                            ping_ev->client_ip,
                                            ping_ev->client_port,
                                            gst_context,
-                                           ping_ev->video_socket.get());
+                                           ping_ev->video_socket.get(),
+                                           current_producer_id(lobbies, sess->session_id));
         }).detach();
       }));
 
   handlers.push_back(app_state->event_bus->register_handler<immer::box<events::AudioSession>>(
-      [ev_bus = app_state->event_bus, audio_server](const immer::box<events::AudioSession> &sess) {
+      [ev_bus = app_state->event_bus, audio_server, lobbies = app_state->lobbies](const immer::box<events::AudioSession> &sess) {
         // Start a thread that will wait for the RTP ping event
-        std::thread([sess, ev_bus, audio_server]() {
+        std::thread([sess, ev_bus, audio_server, lobbies]() {
           auto ping_ev = wait_for_ping<events::RTPAudioPingEvent>(ev_bus, sess);
 
           // Start streaming
@@ -296,7 +315,8 @@ setup_moonlight_handlers(const immer::box<state::AppState> &app_state,
                                            ping_ev->client_port,
                                            ping_ev->audio_socket.get(),
                                            sink_name,
-                                           server_name);
+                                           server_name,
+                                           current_producer_id(lobbies, sess->session_id));
         }).detach();
       }));
 

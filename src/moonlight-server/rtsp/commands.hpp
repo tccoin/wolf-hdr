@@ -38,6 +38,7 @@ RTSP_PACKET ok_msg(int sequence_number,
 // Additional feature supports
 constexpr uint32_t FS_PEN_TOUCH_EVENTS = 0x01;
 constexpr uint32_t FS_CONTROLLER_TOUCH_EVENTS = 0x02;
+constexpr uint32_t FS_DUALSENSE_HAPTIC_AUDIO = 0x04;
 using namespace wolf::core::audio;
 
 RTSP_PACKET
@@ -102,7 +103,9 @@ describe(const RTSP_PACKET &req, const events::StreamSession &session) {
   }
 
   payloads.push_back(
-      {"a", fmt::format("x-ss-general.featureFlags: {}", FS_PEN_TOUCH_EVENTS | FS_CONTROLLER_TOUCH_EVENTS)});
+      {"a",
+       fmt::format("x-ss-general.featureFlags: {}",
+                   FS_PEN_TOUCH_EVENTS | FS_CONTROLLER_TOUCH_EVENTS | FS_DUALSENSE_HAPTIC_AUDIO)});
 
   return ok_msg(req.seq_number, {}, payloads);
 }
@@ -166,6 +169,14 @@ announce(const RTSP_PACKET &req, const events::StreamSession &session) {
                 })                                             //
               | views::transform(parse_arg_line)               // turns an arg line into a pair
               | to<std::map<std::string, std::optional<int>>>; // to map
+
+  const auto client_feature_flags =
+      static_cast<std::uint32_t>(args["x-ml-general.featureFlags"].value_or(0));
+  session.client_feature_flags->store(client_feature_flags, std::memory_order_release);
+  logs::log(logs::debug,
+            "[RTSP] Client feature flags: 0x{:08x} (DualSense haptic audio: {})",
+            client_feature_flags,
+            (client_feature_flags & ML_FF_DUALSENSE_HAPTIC_AUDIO) != 0);
 
   bool video_format_hevc = args["x-nv-vqos[0].bitStreamFormat"].value_or(0) == 1;
   bool video_format_av1 = args["x-nv-vqos[0].bitStreamFormat"].value_or(0) == 2;

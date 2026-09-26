@@ -154,7 +154,10 @@ std::vector<std::pair<std::string, std::vector<std::string>>> PS5Joypad::get_ude
         // Wine's udev enumeration requires an initialized device, not just
         // an accessible character node. Keep the database session-local.
         result.push_back({gen_udev_hw_db_filename(dev_path),
-                          {"E:ID_BUS=bluetooth",
+                          // The streamed controller uses a virtual USB HID
+                          // transport so Proton can associate a DualSense
+                          // ScePad four-channel haptics endpoint with it.
+                          {"E:ID_BUS=usb",
                            "E:ID_VENDOR_ID=054c",
                            "E:ID_MODEL_ID=0ce6",
                            "G:seat",

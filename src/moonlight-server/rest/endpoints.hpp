@@ -9,6 +9,8 @@
 #include <functional>
 #include <helpers/utils.hpp>
 #include <immer/vector_transient.hpp>
+#include <chrono>
+#include <mutex>
 #include <moonlight/control.hpp>
 #include <moonlight/protocol.hpp>
 #include <platforms/hw.hpp>
@@ -19,12 +21,40 @@
 #include <state/config.hpp>
 #include <state/sessions.hpp>
 #include <state/utils.hpp>
+#include <thread>
+#include <unordered_map>
 #include <utility>
 
 namespace endpoints {
 
 using namespace control;
 using namespace wolf::core;
+
+namespace detail {
+
+// Moonlight sends HTTPS /cancel when its transport disappears, including when
+// the user immediately reconnects from the same client.  Keep a monotonic
+// token per client session so a delayed disconnect cleanup cannot stop a
+// newer resumed stream that intentionally has the same stable session id.
+inline std::mutex reconnect_cleanup_mutex;
+inline std::unordered_map<std::size_t, std::uint64_t> reconnect_cleanup_generation;
+
+inline std::uint64_t begin_reconnect_grace(std::size_t session_id) {
+  std::lock_guard lock(reconnect_cleanup_mutex);
+  return ++reconnect_cleanup_generation[session_id];
+}
+
+inline void cancel_reconnect_grace(std::size_t session_id) {
+  std::lock_guard lock(reconnect_cleanup_mutex);
+  ++reconnect_cleanup_generation[session_id];
+}
+
+inline bool reconnect_grace_is_current(std::size_t session_id, std::uint64_t generation) {
+  std::lock_guard lock(reconnect_cleanup_mutex);
+  return reconnect_cleanup_generation[session_id] == generation;
+}
+
+} // namespace detail
 
 template <class T> void server_error(const std::shared_ptr<typename SimpleWeb::Server<T>::Response> &response) {
   XML xml;
@@ -468,15 +498,24 @@ void resume(const std::shared_ptr<typename SimpleWeb::Server<SimpleWeb::HTTPS>::
   auto client_ip = get_client_ip<SimpleWeb::HTTPS>(request);
   auto old_session = state::get_session_by_client(state->running_sessions->load(), current_client);
   if (old_session) {
+    // A preceding /cancel only means the Moonlight transport went away.  A
+    // successful resume makes its delayed cleanup stale before it can tear
+    // down the live game or its virtual DualSense/ScePad device group.
+    detail::cancel_reconnect_grace(old_session->session_id);
     auto new_session =
         create_run_session(request->parse_query_string(), client_ip, current_client, state, *old_session->app);
     const bool session_is_in_live_lobby =
         state::get_lobby_by_connected_session(state->lobbies->load(), std::to_string(old_session->session_id))
             .has_value();
-    const bool launcher_runner_is_gone = !old_session->runner_active->load(std::memory_order_acquire);
+    // A base Wolf UI has no lobby-owned application or virtual-device group to
+    // preserve.  Reusing it after a transport disconnect leaves Moonlight
+    // attached to an old UI runner/RTP generation, which makes the next UI
+    // connection hang until the user manually stops the app.  Lobby sessions
+    // deliberately keep their existing runner so a game and its DualSense
+    // haptics survive a Moonlight reconnect.
+    const bool must_rebuild_standalone_session = !session_is_in_live_lobby;
 
-    if (state::has_same_video_output_contract(*old_session, *new_session) &&
-        !(launcher_runner_is_gone && !session_is_in_live_lobby)) {
+    if (state::has_same_video_output_contract(*old_session, *new_session) && !must_rebuild_standalone_session) {
       // A transport reconnect with an identical mode can keep the compositor and
       // application alive. Only the RTP/crypto session is refreshed.
       new_session->wayland_display = std::move(old_session->wayland_display);
@@ -491,10 +530,9 @@ void resume(const std::shared_ptr<typename SimpleWeb::Server<SimpleWeb::HTTPS>::
         return state::remove_session(ses_v, old_session.value()).push_back(*new_session);
       });
     } else {
-      if (launcher_runner_is_gone && !session_is_in_live_lobby) {
+      if (must_rebuild_standalone_session) {
         logs::log(logs::warning,
-                  "[HTTP] Resume found session {} without a live launcher runner; rebuilding it instead of "
-                  "reusing a dead compositor",
+                  "[HTTP] Resume rebuilding standalone session {} instead of reusing a disconnected Wolf UI runner",
                   old_session->session_id);
       }
       logs::log(logs::info,
@@ -512,8 +550,9 @@ void resume(const std::shared_ptr<typename SimpleWeb::Server<SimpleWeb::HTTPS>::
       // generations intentionally share the stable Moonlight client session id.
       state->event_bus->fire_event(
           immer::box<events::StopStreamEvent>(events::StopStreamEvent{.session_id = old_session->session_id}));
-      state->running_sessions->update(
-          [new_session](const immer::vector<events::StreamSession> &ses_v) { return ses_v.push_back(*new_session); });
+      state->running_sessions->update([&old_session, new_session](const immer::vector<events::StreamSession> &ses_v) {
+        return state::remove_session(ses_v, old_session.value()).push_back(*new_session);
+      });
       state->event_bus->fire_event(immer::box<events::StreamSession>(*new_session));
     }
 
@@ -536,12 +575,68 @@ void cancel(const std::shared_ptr<typename SimpleWeb::Server<SimpleWeb::HTTPS>::
 
   auto client_session = state::get_session_by_client(state->running_sessions->load(), current_client);
   if (client_session) {
-    state->event_bus->fire_event(
-        immer::box<events::StopStreamEvent>(events::StopStreamEvent{.session_id = client_session->session_id}));
+    // The base Wolf UI has no lobby-owned game process or virtual ScePad
+    // device group to preserve.  Keep the normal Moonlight stop semantics
+    // here: the client calls /cancel and immediately queries serverinfo to
+    // verify that CurrentGame is zero.  Applying reconnect grace to this
+    // case makes Moonlight misleadingly report that the app belongs to
+    // another client, even when this very client started it.
+    const auto standalone_session_id = client_session->session_id;
+    const auto lobbies = state->lobbies->load();
+    if (!state::get_lobby_by_connected_session(lobbies, std::to_string(standalone_session_id))) {
+      logs::log(logs::info, "[HTTPS] Stopping standalone Wolf UI session {} on /cancel", standalone_session_id);
+      detail::cancel_reconnect_grace(standalone_session_id);
+      state->event_bus->fire_event(
+          immer::box<events::StopStreamEvent>{events::StopStreamEvent{.session_id = standalone_session_id}});
+      state->running_sessions->update([&client_session](const immer::vector<events::StreamSession> &sessions) {
+        return state::remove_session(sessions, client_session.value());
+      });
 
-    state->running_sessions->update([&client_session](const immer::vector<events::StreamSession> &ses_v) {
-      return state::remove_session(ses_v, client_session.value());
-    });
+      XML xml;
+      xml.put("root.<xmlattr>.status_code", 200);
+      xml.put("root.cancel", 1);
+      send_xml<SimpleWeb::HTTPS>(response, SimpleWeb::StatusCode::success_ok, xml);
+      return;
+    }
+
+    // Disconnecting Moonlight sends /cancel before a reconnect.  Treat it as
+    // a transport interruption instead of an immediate StopStreamEvent:
+    // stopping the stream leaves the lobby and delivers udev remove events
+    // for the virtual DualSense, which permanently disables ScePad/Wwise
+    // haptics until the game process is restarted.  The existing runtime
+    // setting bounds how long a genuinely abandoned session is retained.
+    const auto session_id = client_session->session_id;
+    const auto grace = std::chrono::seconds(
+        state->config->runtime_settings->load()->single_player_disconnect_grace_seconds);
+    const auto generation = detail::begin_reconnect_grace(session_id);
+    logs::log(logs::info,
+              "[HTTPS] Deferring cancel cleanup for session {} by {} seconds to preserve reconnect devices",
+              session_id,
+              grace.count());
+    // /cancel is followed by a fresh RTSP setup on reconnect.  Retire only
+    // the old RTP encoder pipelines now; retaining them makes the next setup
+    // register duplicate interpipe listeners and Moonlight disconnects again.
+    state->event_bus->fire_event(
+        immer::box<events::StopClientTransportEvent>(events::StopClientTransportEvent{.session_id = session_id}));
+
+    std::thread([state, session_id, generation, grace]() {
+      std::this_thread::sleep_for(grace);
+      if (!detail::reconnect_grace_is_current(session_id, generation)) {
+        return;
+      }
+
+      const auto current = state::get_session_by_id(state->running_sessions->load().get(), session_id);
+      if (!current) {
+        return;
+      }
+
+      logs::log(logs::info, "[HTTPS] Reconnect grace elapsed; stopping abandoned session {}", session_id);
+      state->event_bus->fire_event(
+          immer::box<events::StopStreamEvent>(events::StopStreamEvent{.session_id = session_id}));
+      state->running_sessions->update([&current](const immer::vector<events::StreamSession> &sessions) {
+        return state::remove_session(sessions, current.value());
+      });
+    }).detach();
   } else {
     auto client_ip = get_client_ip<SimpleWeb::HTTPS>(request);
     logs::log(logs::warning, "[HTTPS] Received resume event from an unregistered session, ip: {}", client_ip);

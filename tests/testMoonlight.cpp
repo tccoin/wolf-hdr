@@ -255,6 +255,24 @@ TEST_CASE("HDR video pipeline selects a 10-bit encoder path", "[Streaming][HDR]"
   REQUIRE(streaming::prepare_video_pipeline(pipeline, false) == pipeline);
 }
 
+TEST_CASE("HDR video metadata follows the global virtual display peak", "[Streaming][HDR]") {
+  const char *old_peak = std::getenv("WOLF_HDR_PEAK_NITS");
+  const std::optional<std::string> saved_peak = old_peak ? std::optional<std::string>{old_peak} : std::nullopt;
+  setenv("WOLF_HDR_PEAK_NITS", "1200", 1);
+
+  const auto pipeline = std::string{
+      "video/x-raw(memory:CUDAMemory), format=NV12 ! nvh265enc ! video/x-h265, profile=main,"};
+  const auto hdr = streaming::prepare_video_pipeline(pipeline, true);
+  REQUIRE_THAT(hdr, Catch::Matchers::ContainsSubstring(":12000000:1"));
+  REQUIRE_THAT(hdr, Catch::Matchers::ContainsSubstring("content-light-level=(string)1200:400"));
+
+  if (saved_peak) {
+    setenv("WOLF_HDR_PEAK_NITS", saved_peak->c_str(), 1);
+  } else {
+    unsetenv("WOLF_HDR_PEAK_NITS");
+  }
+}
+
 TEST_CASE("SDR uses Wolf's native CUDA conversion path", "[Streaming][SDR]") {
   const auto hdr_pipeline = std::string{
       "interpipesrc ! queue ! cudaupload ! video/x-raw(memory:CUDAMemory), format=NV12 ! nvh265enc"};

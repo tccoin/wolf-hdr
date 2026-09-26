@@ -16,7 +16,8 @@ void UnixSocketServer::endpoint_RuntimeSettings(const wolf::api::HTTPRequest &re
   send_http(socket,
             200,
             rfl::json::write(RuntimeSettingsResponse{
-                .single_player_disconnect_grace_seconds = settings->single_player_disconnect_grace_seconds}));
+                .single_player_disconnect_grace_seconds = settings->single_player_disconnect_grace_seconds,
+                .hdr_peak_nits = settings->hdr_peak_nits}));
 }
 
 void UnixSocketServer::endpoint_UpdateRuntimeSettings(const wolf::api::HTTPRequest &req,
@@ -28,6 +29,8 @@ void UnixSocketServer::endpoint_UpdateRuntimeSettings(const wolf::api::HTTPReque
   }
 
   constexpr int MAX_DISCONNECT_GRACE_SECONDS = 12 * 60 * 60;
+  constexpr int MIN_HDR_PEAK_NITS = 100;
+  constexpr int MAX_HDR_PEAK_NITS = 10000;
   auto current = state_->app_state->config->runtime_settings->load();
   auto next = *current;
   if (update->single_player_disconnect_grace_seconds) {
@@ -41,15 +44,27 @@ void UnixSocketServer::endpoint_UpdateRuntimeSettings(const wolf::api::HTTPReque
     }
     next.single_player_disconnect_grace_seconds = seconds;
   }
+  if (update->hdr_peak_nits) {
+    const int nits = *update->hdr_peak_nits;
+    if (nits < MIN_HDR_PEAK_NITS || nits > MAX_HDR_PEAK_NITS) {
+      send_http(socket,
+                400,
+                rfl::json::write(GenericErrorResponse{.error = "hdr_peak_nits must be 100..10000"}));
+      return;
+    }
+    next.hdr_peak_nits = nits;
+  }
 
   state::update_runtime_settings(state_->app_state->config.get(), next);
   logs::log(logs::info,
-            "[SETTINGS] Single-player disconnect grace period set to {} seconds",
-            next.single_player_disconnect_grace_seconds);
+            "[SETTINGS] Runtime settings updated: disconnect grace {} seconds, virtual HDR peak {} nits",
+            next.single_player_disconnect_grace_seconds,
+            next.hdr_peak_nits);
   send_http(socket,
             200,
             rfl::json::write(RuntimeSettingsResponse{
-                .single_player_disconnect_grace_seconds = next.single_player_disconnect_grace_seconds}));
+                .single_player_disconnect_grace_seconds = next.single_player_disconnect_grace_seconds,
+                .hdr_peak_nits = next.hdr_peak_nits}));
 }
 
 void UnixSocketServer::endpoint_RestartService(const wolf::api::HTTPRequest &req, std::shared_ptr<UnixSocket> socket) {

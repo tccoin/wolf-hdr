@@ -20,7 +20,9 @@ RUN python3 -m pip install --no-cache-dir --target /nvrtc nvidia-cuda-nvrtc-cu12
  && rm -rf /nvrtc
 
 FROM runtime-base AS toolchain
-ARG BUILD_JOBS=4
+# Keep enough parallelism to make source builds practical on the 32-core
+# build host, without exhausting RAM when GStreamer and Rust build together.
+ARG BUILD_JOBS=16
 RUN dnf install -y dnf-plugins-core 'dnf-command(builddep)' \
  && dnf builddep -y gstreamer1 gstreamer1-plugins-base gstreamer1-plugins-good gstreamer1-plugins-bad-free \
  && dnf install -y \
@@ -81,19 +83,25 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
 FROM toolchain AS compositor-build
 COPY third_party/gst-wayland-display/ /src/gst-wayland-display/
 WORKDIR /src/gst-wayland-display
-RUN cargo cinstall --locked --release -p gst-plugin-wayland-display --features cuda,gl-hdr \
+RUN CARGO_BUILD_JOBS=${BUILD_JOBS} cargo cinstall --locked --release -p gst-plugin-wayland-display --features cuda,gl-hdr \
       --prefix=/opt/gst --libdir=/opt/gst/lib64/gstreamer-1.0 \
       --pkgconfigdir=/opt/gst/lib64/pkgconfig
 
 FROM compositor-build AS wolf-builder
-ARG BUILD_JOBS=4
+ARG BUILD_JOBS=16
+# Native DualSense haptics under Proton requires the USB transport identity.
+# Keep this on in the reproducible HDR image; callers can still override it
+# for upstream-behaviour comparison builds.
+ARG INPUTTINO_PS5_USB_PERSONA=ON
 COPY CMakeLists.txt /wolf/CMakeLists.txt
 COPY cmake/ /wolf/cmake/
 COPY src/ /wolf/src/
+COPY third_party/inputtino/patches/ /wolf/third_party/inputtino/patches/
 WORKDIR /wolf
 RUN cmake -S . -B /build/wolf -G Ninja -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_CXX_STANDARD=20 -DBUILD_SHARED_LIBS=OFF -DBoost_USE_STATIC_LIBS=ON \
       -DBUILD_TESTING=OFF -DBUILD_FAKE_UDEV_CLI=ON \
+      -DWOLF_INPUTTINO_PS5_USB_PERSONA=${INPUTTINO_PS5_USB_PERSONA} \
  && cmake --build /build/wolf --target wolf fake-udev --parallel ${BUILD_JOBS}
 
 FROM runtime-base AS runner
@@ -101,6 +109,7 @@ COPY --from=compositor-build /opt/gst/ /opt/gst/
 COPY --from=wolf-builder /build/wolf/src/moonlight-server/wolf /wolf/wolf
 COPY --from=wolf-builder /build/wolf/src/fake-udev/fake-udev /wolf/fake-udev
 COPY docker/supervisord.conf /etc/supervisord.conf
+COPY docker/pulse/wolf-scepad.pa /etc/pulse/wolf-scepad.pa
 COPY --chmod=0755 docker/startup.sh /opt/gow/startup-app.sh
 RUN dnf install -y libatomic && dnf clean all && ldconfig \
  && ! ldd /wolf/wolf | grep 'not found'

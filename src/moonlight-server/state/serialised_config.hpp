@@ -93,9 +93,13 @@ struct GstreamerSettings {
   GstAudioCfg audio;
 };
 
-/** Settings that are safe to change while Wolf is running. */
+/** Settings exposed by Wolf UI and persisted in the server configuration. */
 struct RuntimeSettings {
   int single_player_disconnect_grace_seconds = 10 * 60;
+  // Peak brightness reported by Wolf's virtual HDR display. This describes the
+  // target display to clients; it is deliberately independent of KDE's local
+  // output calibration and of a game's own paper-white/brightness controls.
+  int hdr_peak_nits = 1000;
 };
 
 struct AppCMD {

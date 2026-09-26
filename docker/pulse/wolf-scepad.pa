@@ -1,0 +1,18 @@
+# Wolf's local PulseAudio modules.
+#
+# This file is deliberately separate from supervisord.conf: the same endpoint
+# must be recreated on every Wolf start, and keeping its identity here makes
+# the Wine/Proton association inspectable and reproducible.
+#
+# Establish a normal default before the special haptic endpoint.  If the
+# haptic endpoint is loaded first, Pulse selects it as the desktop default and
+# ordinary stereo game audio can be routed into its four haptic channels.
+load-module module-always-sink
+
+# CONTROL Resonant's Wwise ScePad backend looks for a 48 kHz, four-channel
+# USB DualSense audio endpoint associated with the virtual controller.  The
+# virtual HID intentionally keeps its ordinary dynamic Windows ContainerId so
+# GameInput sees a fresh controller; WinePulse pairs an *active* Wolf controller
+# to this unique named endpoint. Do not replace this with generic stereo: Wwise
+# would then never expose the two haptic channels to Moonlight.
+load-module module-null-sink sink_name=control_dualsense_audio rate=48000 channels=4 channel_map=front-left,front-right,rear-left,rear-right sink_properties="device.description=Wolf_DualSense_ScePad device.bus=usb device.vendor.id=054c device.product.id=0ce6 api.alsa.split.name=control_dualsense_audio"

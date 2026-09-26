@@ -3,6 +3,7 @@
 #include <boost/endian/conversion.hpp>
 #include <core/input.hpp>
 #include <crypto/crypto.hpp>
+#include <cstddef>
 #include <cstdint>
 #include <helpers/utils.hpp>
 #include <memory>
@@ -28,6 +29,7 @@ enum PACKET_TYPE : std::uint16_t {
   MOTION_EVENT = boost::endian::little_to_native(0x5501),
   RGB_LED_EVENT = boost::endian::little_to_native(0x5502),
   ADAPTIVE_TRIGGER_EVENT = boost::endian::little_to_native(0x5503),
+  DUALSENSE_HAPTIC_AUDIO = boost::endian::little_to_native(0x5504),
 };
 
 enum INPUT_TYPE : int {
@@ -401,6 +403,25 @@ struct ControlAdaptiveTriggerPacket {
   inputtino::PS5Joypad::TriggerEffect effect;
 };
 
+// Moonlight Gen7 encrypted-control payload for 3 kHz DualSense audio haptics.
+// The ControlPacket header is 4 bytes; header.length counts only this 72-byte
+// payload. Keep the explicit little-endian wire fields and fixed PCM size.
+struct ControlDualSenseHapticAudioPacket {
+  ControlPacket header;
+  std::uint8_t version;
+  std::uint8_t controller_id;
+  std::uint16_t sequence;
+  std::uint16_t sample_rate;
+  std::uint16_t frame_count;
+  std::array<std::int8_t, 64> pcm;
+};
+
+static_assert(sizeof(ControlDualSenseHapticAudioPacket) == 76,
+              "DualSense haptic audio control packet must be a 4-byte header + 72-byte payload");
+static_assert(offsetof(ControlDualSenseHapticAudioPacket, sequence) == 6 &&
+                  offsetof(ControlDualSenseHapticAudioPacket, pcm) == 12,
+              "DualSense haptic audio packet fields must match the little-endian wire layout");
+
 struct ControlEncryptedPacket {
   ControlPacket header; // Always 0x0001 (see PACKET_TYPE ENCRYPTED)
   std::uint32_t seq;    // Monotonically increasing sequence number (used as IV for AES-GCM)
@@ -501,6 +522,8 @@ static constexpr const char *packet_type_to_str(pkts::PACKET_TYPE p) noexcept {
     return "RGB_LED_EVENT";
   case pkts::ADAPTIVE_TRIGGER_EVENT:
     return "ADAPTIVE_TRIGGER_EVENT";
+  case pkts::DUALSENSE_HAPTIC_AUDIO:
+    return "DUALSENSE_HAPTIC_AUDIO";
   }
   return "Unrecognised";
 }

@@ -8,6 +8,7 @@
 #include <immer/box.hpp>
 #include <platforms/input.hpp>
 #include <string>
+#include <type_traits>
 
 namespace control {
 
@@ -17,12 +18,10 @@ using namespace wolf::core;
 using namespace std::string_literals;
 using namespace moonlight::control;
 
-std::shared_ptr<events::JoypadTypes> create_new_joypad(const events::StreamSession &session,
-                                                       immer::box<std::shared_ptr<ENetPeer>> connected_client,
-                                                       int controller_number,
-                                                       CONTROLLER_TYPE requested_type,
-                                                       uint8_t capabilities) {
-
+void bind_joypad_feedback(events::JoypadTypes &joypad,
+                          const events::StreamSession &session,
+                          immer::box<std::shared_ptr<ENetPeer>> connected_client,
+                          int controller_number) {
   auto on_rumble_fn = ([connected_client, controller_number, aes_key = session.aes_key](int low_freq, int high_freq) {
     auto rumble_pkt = ControlRumblePacket{
         .header = {.type = RUMBLE_DATA, .length = sizeof(ControlRumblePacket) - sizeof(ControlPacket)},
@@ -30,7 +29,13 @@ std::shared_ptr<events::JoypadTypes> create_new_joypad(const events::StreamSessi
         .low_freq = boost::endian::native_to_little((uint16_t)low_freq),
         .high_freq = boost::endian::native_to_little((uint16_t)high_freq)};
     std::string plaintext = {(char *)&rumble_pkt, sizeof(rumble_pkt)};
-    encrypt_and_send(plaintext, aes_key, connected_client);
+    const auto sent = encrypt_and_send(plaintext, aes_key, connected_client);
+    logs::log(logs::debug,
+              "[RUMBLE] controller={} low_freq={} high_freq={} send_queued={}",
+              controller_number,
+              low_freq,
+              high_freq,
+              sent);
   });
 
   auto on_led_fn = ([connected_client, controller_number, aes_key = session.aes_key](int r, int g, int b) {
@@ -51,8 +56,65 @@ std::shared_ptr<events::JoypadTypes> create_new_joypad(const events::StreamSessi
         .controller_number = boost::endian::native_to_little((uint16_t)controller_number),
         .effect = effect};
     std::string plaintext = {(char *)&rumble_pkt, sizeof(rumble_pkt)};
-    encrypt_and_send(plaintext, aes_key, connected_client);
+    const auto sent = encrypt_and_send(plaintext, aes_key, connected_client);
+    logs::log(logs::debug,
+              "[ADAPTIVE_TRIGGER] controller={} flags={} left_type={} right_type={} left_data={} right_data={} send_queued={}",
+              controller_number,
+              effect.event_flags,
+              effect.type_left,
+              effect.type_right,
+              crypto::str_to_hex({reinterpret_cast<const char *>(effect.left.data()), effect.left.size()}),
+              crypto::str_to_hex({reinterpret_cast<const char *>(effect.right.data()), effect.right.size()}),
+              sent);
   });
+
+  std::visit(
+      [&](auto &pad) {
+        pad.set_on_rumble(on_rumble_fn);
+        // The variant stores wolf::core::input::PS5Joypad, which derives from
+        // inputtino::PS5Joypad to add the virtual-device metadata helpers.
+        // Testing for exact type equality silently skipped all DualSense-only
+        // feedback callbacks after the reconnect refactor.
+        if constexpr (std::is_base_of_v<inputtino::PS5Joypad, std::decay_t<decltype(pad)>>) {
+          pad.set_on_led(on_led_fn);
+          pad.set_on_trigger_effect(on_adaptive_trigger_fn);
+        }
+      },
+      joypad);
+}
+
+void request_controller_motion(const events::StreamSession &session,
+                               immer::box<std::shared_ptr<ENetPeer>> connected_client,
+                               int controller_number,
+                               uint8_t capabilities) {
+  if (capabilities & ACCELEROMETER) {
+    logs::log(logs::info, "Requesting accelerometer events for controller {}", controller_number);
+    auto accelerometer_pkt = ControlMotionEventPacket{
+        .header{.type = MOTION_EVENT, .length = sizeof(ControlMotionEventPacket) - sizeof(ControlPacket)},
+        .controller_number = static_cast<uint16_t>(controller_number),
+        .reportrate = 100,
+        .type = ACCELERATION};
+    std::string plaintext = {(char *)&accelerometer_pkt, sizeof(accelerometer_pkt)};
+    encrypt_and_send(plaintext, session.aes_key, connected_client);
+  }
+
+  if (capabilities & GYRO) {
+    logs::log(logs::info, "Requesting gyroscope events for controller {}", controller_number);
+    auto gyro_pkt = ControlMotionEventPacket{
+        .header{.type = MOTION_EVENT, .length = sizeof(ControlMotionEventPacket) - sizeof(ControlPacket)},
+        .controller_number = static_cast<uint16_t>(controller_number),
+        .reportrate = 100,
+        .type = GYROSCOPE};
+    std::string plaintext = {(char *)&gyro_pkt, sizeof(gyro_pkt)};
+    encrypt_and_send(plaintext, session.aes_key, connected_client);
+  }
+}
+
+std::shared_ptr<events::JoypadTypes> create_new_joypad(const events::StreamSession &session,
+                                                       immer::box<std::shared_ptr<ENetPeer>> connected_client,
+                                                       int controller_number,
+                                                       CONTROLLER_TYPE requested_type,
+                                                       uint8_t capabilities) {
 
   std::shared_ptr<events::JoypadTypes> new_pad;
   auto controllers_override = session.client_settings->controllers_override;
@@ -115,7 +177,6 @@ std::shared_ptr<events::JoypadTypes> create_new_joypad(const events::StreamSessi
       logs::log(logs::error, "Failed to create Xbox One joypad: {}", result.getErrorMessage());
       return {};
     } else {
-      (*result).set_on_rumble(on_rumble_fn);
       new_pad = std::make_shared<events::JoypadTypes>(std::move(*result));
     }
     break;
@@ -128,9 +189,6 @@ std::shared_ptr<events::JoypadTypes> create_new_joypad(const events::StreamSessi
       logs::log(logs::error, "Failed to create PS5 joypad: {}", result.getErrorMessage());
       return {};
     } else {
-      (*result).set_on_rumble(on_rumble_fn);
-      (*result).set_on_led(on_led_fn);
-      (*result).set_on_trigger_effect(on_adaptive_trigger_fn);
       new_pad = std::make_shared<events::JoypadTypes>(std::move(*result));
 
       // Let's wait for the kernel to pick it up and mount the /dev/ devices
@@ -161,34 +219,14 @@ std::shared_ptr<events::JoypadTypes> create_new_joypad(const events::StreamSessi
       logs::log(logs::error, "Failed to create Switch joypad: {}", result.getErrorMessage());
       return {};
     } else {
-      (*result).set_on_rumble(on_rumble_fn);
       new_pad = std::make_shared<events::JoypadTypes>(std::move(*result));
     }
     break;
   }
 
-  if (capabilities & ACCELEROMETER && final_type == wolf::config::ControllerType::PS) {
-    // Request acceleromenter events from the client at 100 Hz
-    logs::log(logs::info, "Requesting accelerometer events for controller {}", controller_number);
-    auto accelerometer_pkt = ControlMotionEventPacket{
-        .header{.type = MOTION_EVENT, .length = sizeof(ControlMotionEventPacket) - sizeof(ControlPacket)},
-        .controller_number = static_cast<uint16_t>(controller_number),
-        .reportrate = 100,
-        .type = ACCELERATION};
-    std::string plaintext = {(char *)&accelerometer_pkt, sizeof(accelerometer_pkt)};
-    encrypt_and_send(plaintext, session.aes_key, connected_client);
-  }
-
-  if (capabilities & GYRO && final_type == wolf::config::ControllerType::PS) {
-    // Request gyroscope events from the client at 100 Hz
-    logs::log(logs::info, "Requesting gyroscope events for controller {}", controller_number);
-    auto gyro_pkt = ControlMotionEventPacket{
-        .header{.type = MOTION_EVENT, .length = sizeof(ControlMotionEventPacket) - sizeof(ControlPacket)},
-        .controller_number = static_cast<uint16_t>(controller_number),
-        .reportrate = 100,
-        .type = GYROSCOPE};
-    std::string plaintext = {(char *)&gyro_pkt, sizeof(gyro_pkt)};
-    encrypt_and_send(plaintext, session.aes_key, connected_client);
+  bind_joypad_feedback(*new_pad, session, connected_client, controller_number);
+  if (final_type == wolf::config::ControllerType::PS) {
+    request_controller_motion(session, connected_client, controller_number, capabilities);
   }
 
   session.joypads->update([&](events::JoypadList joypads) {
@@ -384,9 +422,11 @@ void keyboard_key(const KEYBOARD_PACKET &pkt, events::StreamSession &session) {
     if (pkt.modifiers & KEYBOARD_MODIFIERS::ALT && moonlight_key != M_ALT)
       wolf_ui_combo_pressed++;
 
-    // CTRL + ALT + SHIFT + W
+    // CTRL + ALT + SHIFT + W returns to Wolf UI; the A form terminates the
+    // current app and stream while leaving the Wolf host service running.
     const bool wolf_ui_combo = (wolf_ui_combo_pressed == 3 && moonlight_key == 0x57);
-    if (wolf_ui_combo) {
+    const bool stop_lobby_combo = (wolf_ui_combo_pressed == 3 && moonlight_key == 0x41);
+    if (wolf_ui_combo || stop_lobby_combo) {
       // Ensure modifiers are released before we return to overlay
       std::visit(
           [](auto &keyboard) {
@@ -395,8 +435,13 @@ void keyboard_key(const KEYBOARD_PACKET &pkt, events::StreamSession &session) {
             keyboard.release(M_ALT);
           },
           session.keyboard->value());
-      session.event_bus->fire_event(
-          immer::box<events::ClientWolfUIComboEvent>{events::ClientWolfUIComboEvent{.session_id = session.session_id}});
+      if (stop_lobby_combo) {
+        session.event_bus->fire_event(immer::box<events::ClientStopLobbyComboEvent>{
+            events::ClientStopLobbyComboEvent{.session_id = session.session_id}});
+      } else {
+        session.event_bus->fire_event(immer::box<events::ClientWolfUIComboEvent>{
+            events::ClientWolfUIComboEvent{.session_id = session.session_id}});
+      }
       return;
     }
 
@@ -590,10 +635,14 @@ void controller_arrival(const CONTROLLER_ARRIVAL_PACKET &pkt,
                         immer::box<std::shared_ptr<ENetPeer>> connected_client) {
   auto joypads = session.joypads->load();
   if (joypads->find(pkt.controller_number)) {
-    // TODO: should we replace it instead?
     logs::log(logs::debug,
-              "[INPUT] Received CONTROLLER_ARRIVAL for controller {} which is already present; skipping...",
+              "[INPUT] Reusing persistent virtual controller {} and rebinding feedback to the current client",
               pkt.controller_number);
+    auto joypad = joypads->find(pkt.controller_number);
+    bind_joypad_feedback(**joypad, session, connected_client, pkt.controller_number);
+    if (std::holds_alternative<PS5Joypad>(**joypad)) {
+      request_controller_motion(session, connected_client, pkt.controller_number, pkt.capabilities);
+    }
   } else {
     create_new_joypad(session,
                       connected_client,
@@ -611,21 +660,21 @@ void controller_multi(const CONTROLLER_MULTI_PACKET &pkt,
   if (auto joypad = joypads->find(pkt.controller_number)) {
     selected_pad = std::move(*joypad);
 
-    // Check if Moonlight is sending the final packet for this pad
+    // Keep the virtual device alive when the physical/client controller goes
+    // away. Native DualSense games often enumerate only once at startup; a
+    // udev remove/add would leave them holding a dead handle. Neutralize the
+    // persistent device instead, and reuse it when input resumes.
     if (!(pkt.active_gamepad_mask & (1 << pkt.controller_number))) {
-      logs::log(logs::debug, "Removing joypad {}", pkt.controller_number);
-      // Send the event downstream, Docker will pick it up and remove the device
-      events::UnplugDeviceEvent unplug_ev{.session_id = std::to_string(session.session_id)};
+      logs::log(logs::debug, "Neutralizing persistent joypad {}", pkt.controller_number);
       std::visit(
-          [&unplug_ev](auto &pad) {
-            unplug_ev.udev_events = pad.get_udev_events();
-            unplug_ev.udev_hw_db_entries = pad.get_udev_hw_db_entries();
+          [](inputtino::Joypad &pad) {
+            pad.set_pressed_buttons(0);
+            pad.set_stick(inputtino::Joypad::LS, 0, 0);
+            pad.set_stick(inputtino::Joypad::RS, 0, 0);
+            pad.set_triggers(0, 0);
           },
           *selected_pad);
-      session.event_bus->fire_event(immer::box<events::UnplugDeviceEvent>(unplug_ev));
-
-      // Remove the joypad, this will delete the last reference
-      session.joypads->update([&](events::JoypadList joypads) { return joypads.erase(pkt.controller_number); });
+      return;
     }
   } else {
     // Old Moonlight doesn't support CONTROLLER_ARRIVAL, we create a default pad when it's first mentioned
@@ -638,11 +687,16 @@ void controller_multi(const CONTROLLER_MULTI_PACKET &pkt,
           std::uint16_t bf = pkt.button_flags;
           std::uint32_t bf2 = pkt.buttonFlags2;
           auto pressed_buttons = bf | (bf2 << 16);
-          // Check for our special WOLF-UI combo (START + UP + RB)
+          // START + UP + RB returns to Wolf UI. START + DOWN + RB terminates
+          // the current app and stream without stopping the Wolf host.
           if (pressed_buttons & inputtino::Joypad::START && pressed_buttons & inputtino::Joypad::DPAD_UP &&
               pressed_buttons & inputtino::Joypad::RIGHT_BUTTON) {
             session.event_bus->fire_event(immer::box<events::ClientWolfUIComboEvent>{
                 events::ClientWolfUIComboEvent{.session_id = session.session_id}});
+          } else if (pressed_buttons & inputtino::Joypad::START && pressed_buttons & inputtino::Joypad::DPAD_DOWN &&
+                     pressed_buttons & inputtino::Joypad::RIGHT_BUTTON) {
+            session.event_bus->fire_event(immer::box<events::ClientStopLobbyComboEvent>{
+                events::ClientStopLobbyComboEvent{.session_id = session.session_id}});
           }
           // Keep the native DualSense Create button forwarded to the game. On
           // opt-in tiles, its press edge also sends Steam's normal F12 shortcut.

@@ -36,6 +36,10 @@ void start_runner(std::shared_ptr<events::Runner> runner,
   full_env.set("GAMESCOPE_HEIGHT", std::to_string(args->video_settings.height));
   full_env.set("GAMESCOPE_REFRESH", std::to_string(args->video_settings.refresh_rate));
   full_env.set("WOLF_VIDEO_BUFFER_CAPS", args->video_settings.video_producer_buffer_caps);
+  // The virtual display peak is a global Wolf setting. Config loading and the
+  // runtime-settings API keep this environment value current; explicitly pass
+  // it into app containers instead of depending on Docker host-env inheritance.
+  full_env.set("WOLF_HDR_PEAK_NITS", utils::get_env("WOLF_HDR_PEAK_NITS", "1000"));
 
   if (auto w_display = args->wayland_display.get()) {
     auto socket_name = virtual_display::get_wayland_socket_name(*w_display);

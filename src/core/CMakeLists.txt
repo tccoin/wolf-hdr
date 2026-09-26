@@ -46,13 +46,27 @@ if (UNIX AND NOT APPLE)
     list(APPEND CORE_SRC src/platforms/linux/batched_send/batched_send.cpp)
 
     option(WOLF_CUSTOM_INPUTTINO_SRC "Use custom inputtino source" OFF)
+    option(WOLF_INPUTTINO_PS5_USB_PERSONA
+            "Expose the virtual DualSense as USB instead of Bluetooth" OFF)
     if (WOLF_CUSTOM_INPUTTINO_SRC)
         add_subdirectory(${WOLF_CUSTOM_INPUTTINO_SRC} ${CMAKE_CURRENT_BINARY_DIR}/inputtino EXCLUDE_FROM_ALL)
     else ()
+        set(INPUTTINO_PATCH_COMMAND
+                git apply --check ${CMAKE_SOURCE_DIR}/third_party/inputtino/patches/uhid-set-report-reply.patch
+                COMMAND git apply ${CMAKE_SOURCE_DIR}/third_party/inputtino/patches/uhid-set-report-reply.patch)
+        if (WOLF_INPUTTINO_PS5_USB_PERSONA)
+            list(APPEND INPUTTINO_PATCH_COMMAND
+                    COMMAND git apply --check ${CMAKE_SOURCE_DIR}/third_party/inputtino/patches/ps5-usb-persona.patch
+                    COMMAND git apply ${CMAKE_SOURCE_DIR}/third_party/inputtino/patches/ps5-usb-persona.patch)
+        endif ()
+        list(APPEND INPUTTINO_PATCH_COMMAND
+                COMMAND git apply --check ${CMAKE_SOURCE_DIR}/third_party/inputtino/patches/ps5-trigger-effect-type.patch
+                COMMAND git apply ${CMAKE_SOURCE_DIR}/third_party/inputtino/patches/ps5-trigger-effect-type.patch)
         FetchContent_Declare(
                 inputtino
                 GIT_REPOSITORY https://github.com/games-on-whales/inputtino.git
-                GIT_TAG fd136cf)
+                GIT_TAG fd136cf
+                PATCH_COMMAND ${INPUTTINO_PATCH_COMMAND})
         FetchContent_MakeAvailable(inputtino)
     endif ()
 

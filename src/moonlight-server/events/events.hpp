@@ -319,6 +319,16 @@ struct StopStreamEvent {
 };
 
 /**
+ * Stop only the Moonlight RTP encoder pipelines.  Unlike StopStreamEvent it
+ * deliberately keeps the stream session, lobby, compositor, and virtual input
+ * devices alive so a client reconnect can attach without making a running game
+ * lose its ScePad/DualSense device group.
+ */
+struct StopClientTransportEvent {
+  std::size_t session_id;
+};
+
+/**
  * A producer or encoder pipeline failed.  This must be propagated to the
  * session/lobby owner; otherwise the runner and audio pipeline can survive
  * while the client keeps receiving the last video frame forever.
@@ -330,6 +340,13 @@ struct PipelineFailedEvent {
 };
 
 struct ClientWolfUIComboEvent {
+  std::size_t session_id;
+};
+
+// An explicit user request to terminate the currently running lobby.  This
+// intentionally differs from a control-channel disconnect, which preserves
+// the lobby so a Moonlight reconnect retains its input and haptic devices.
+struct ClientStopLobbyComboEvent {
   std::size_t session_id;
 };
 
@@ -373,8 +390,10 @@ using EventBusHandlers = dp::handler_registration<immer::box<PlugDeviceEvent>,
                                                   immer::box<PauseStreamEvent>,
                                                   immer::box<ResumeStreamEvent>,
                                                   immer::box<StopStreamEvent>,
+                                                  immer::box<StopClientTransportEvent>,
                                                   immer::box<PipelineFailedEvent>,
                                                   immer::box<ClientWolfUIComboEvent>,
+                                                  immer::box<ClientStopLobbyComboEvent>,
                                                   immer::box<RTPVideoPingEvent>,
                                                   immer::box<RTPAudioPingEvent>,
                                                   immer::box<StartRunner>,
@@ -395,8 +414,10 @@ using EventBusType = dp::event_bus<immer::box<PlugDeviceEvent>,
                                    immer::box<PauseStreamEvent>,
                                    immer::box<ResumeStreamEvent>,
                                    immer::box<StopStreamEvent>,
+                                   immer::box<StopClientTransportEvent>,
                                    immer::box<PipelineFailedEvent>,
                                    immer::box<ClientWolfUIComboEvent>,
+                                   immer::box<ClientStopLobbyComboEvent>,
                                    immer::box<RTPVideoPingEvent>,
                                    immer::box<RTPAudioPingEvent>,
                                    immer::box<StartRunner>,
@@ -417,8 +438,10 @@ using EventsVariant = std::variant<immer::box<PlugDeviceEvent>,
                                    immer::box<PauseStreamEvent>,
                                    immer::box<ResumeStreamEvent>,
                                    immer::box<StopStreamEvent>,
+                                   immer::box<StopClientTransportEvent>,
                                    immer::box<PipelineFailedEvent>,
                                    immer::box<ClientWolfUIComboEvent>,
+                                   immer::box<ClientStopLobbyComboEvent>,
                                    immer::box<RTPVideoPingEvent>,
                                    immer::box<RTPAudioPingEvent>,
                                    immer::box<StartRunner>,
@@ -459,6 +482,12 @@ struct StreamSession {
   // gcm encryption keys
   std::string aes_key;
   std::string aes_iv;
+
+  // RTSP ANNOUNCE is parsed after the StreamSession has been copied into the
+  // control-server state. Share the negotiated Moonlight feature bits so the
+  // encrypted ENet sender can safely gate optional control packets.
+  std::shared_ptr<std::atomic<std::uint32_t>> client_feature_flags =
+      std::make_shared<std::atomic<std::uint32_t>>(0);
 
   // Moonlight protocol extension to support IP-less connections
   std::array<char, 16> rtp_secret_payload;

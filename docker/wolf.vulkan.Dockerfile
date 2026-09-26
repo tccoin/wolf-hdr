@@ -81,6 +81,7 @@ RUN dnf install -y --allowerasing \
     && dnf clean all
 
 COPY docker/supervisord.conf /etc/supervisord.conf
+COPY docker/pulse/wolf-scepad.pa /etc/pulse/wolf-scepad.pa
 
 # The plugin + gst live under /opt/gst in the base image (GST_PLUGIN_PATH and
 # LD_LIBRARY_PATH are already exported there); register /opt/gst/lib64 with the

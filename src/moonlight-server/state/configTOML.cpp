@@ -434,6 +434,14 @@ Config load_or_default(const std::string &source,
     setenv("WOLF_SDR_REFERENCE_WHITE", std::to_string(default_gst_video_settings.sdr_reference_white).c_str(), 1);
   }
 
+  // The virtual display has no physical EDID. Its peak is a global Wolf
+  // setting, not a per-runner KDE calibration: frog publishes it to nested
+  // compositors and games through preferred HDR metadata.
+  if (cfg.runtime.hdr_peak_nits < 100 || cfg.runtime.hdr_peak_nits > 10000) {
+    throw std::runtime_error("runtime.hdr_peak_nits must be 100..10000");
+  }
+  setenv("WOLF_HDR_PEAK_NITS", std::to_string(cfg.runtime.hdr_peak_nits).c_str(), 1);
+
   default_base_video.h264_encoder = h264_encoder.value().encoder_pipeline;
   if (hevc_encoder) {
     auto hevc_pipeline = hevc_encoder.value().encoder_pipeline;
@@ -513,7 +521,8 @@ Config load_or_default(const std::string &source,
                 .paired_clients = clients_atom,
                 .profiles = profiles_atom,
                 .runtime_settings = std::make_shared<immer::atom<RuntimeSettings>>(RuntimeSettings{
-                    .single_player_disconnect_grace_seconds = cfg.runtime.single_player_disconnect_grace_seconds})};
+                    .single_player_disconnect_grace_seconds = cfg.runtime.single_player_disconnect_grace_seconds,
+                    .hdr_peak_nits = cfg.runtime.hdr_peak_nits})};
 }
 
 void pair(const Config &cfg, const PairedClient &client) {
@@ -584,6 +593,8 @@ void update_runtime_settings(const Config &cfg, const RuntimeSettings &settings)
 
   auto tml = rfl::toml::load<WolfConfig, rfl::DefaultIfMissing>(cfg.config_source).value();
   tml.runtime.single_player_disconnect_grace_seconds = settings.single_player_disconnect_grace_seconds;
+  tml.runtime.hdr_peak_nits = settings.hdr_peak_nits;
+  setenv("WOLF_HDR_PEAK_NITS", std::to_string(settings.hdr_peak_nits).c_str(), 1);
   rfl::toml::save(cfg.config_source, tml);
 }
 

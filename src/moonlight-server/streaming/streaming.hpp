@@ -51,7 +51,8 @@ void start_streaming_video(immer::box<events::VideoSession> video_session,
                            std::string client_ip,
                            unsigned short client_port,
                            std::shared_ptr<immer::atom<gst_video_context::gst_context_ptr>> video_context,
-                           std::shared_ptr<udp::socket> video_socket);
+                           std::shared_ptr<udp::socket> video_socket,
+                           const std::string &initial_producer_id);
 
 std::string initial_video_colorimetry(bool hdr_requested, events::ColorSpace requested_color_space);
 std::string prepare_video_pipeline(std::string pipeline, bool hdr_requested);
@@ -63,7 +64,8 @@ void start_streaming_audio(immer::box<events::AudioSession> audio_session,
                            unsigned short client_port,
                            std::shared_ptr<udp::socket> audio_socket,
                            const std::string &sink_name,
-                           const std::string &server_name);
+                           const std::string &server_name,
+                           const std::string &initial_producer_id);
 
 static bool run_pipeline(
     const std::string &pipeline_desc,

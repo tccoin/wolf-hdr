@@ -1,6 +1,7 @@
 #include "pulse_router.hpp"
 #include <immer/vector_transient.hpp>
 
+#include <control/control.hpp>
 #include <core/audio.hpp>
 #include <helpers/logger.hpp>
 
@@ -8,9 +9,25 @@
 #include <sessions/common.hpp>
 #include <state/sessions.hpp>
 
+#include <algorithm>
+#include <array>
+#include <cmath>
 #include <utility>
 
 using wolf::core::sessions::VIRTUAL_SINK_PREFIX;
+
+namespace {
+constexpr std::string_view SCEPAD_SINK_NAME{"control_dualsense_audio"};
+constexpr unsigned SCEPAD_INPUT_RATE = 48000;
+constexpr unsigned SCEPAD_OUTPUT_RATE = 3000;
+constexpr size_t SCEPAD_DECIMATION = SCEPAD_INPUT_RATE / SCEPAD_OUTPUT_RATE;
+constexpr size_t SCEPAD_PACKET_FRAMES = 32;
+
+std::int8_t float_to_s8(float sample) {
+  const auto scaled = std::lround(std::clamp(sample, -1.0f, 1.0f) * 127.0f);
+  return static_cast<std::int8_t>(std::clamp<long>(scaled, -127, 127));
+}
+} // namespace
 
 namespace wolf::core::audio {
 
@@ -43,6 +60,18 @@ setup_pulseaudio_router_handlers(const immer::box<state::AppState> &app_state,
       [state](const immer::box<events::DockerContainerStopped> &ev) {
         if (state)
           state->on_container_stopped(*ev);
+      }));
+
+  handlers.push_back(app_state->event_bus->register_handler<immer::box<events::JoinLobbyEvent>>(
+      [state](const immer::box<events::JoinLobbyEvent> &ev) {
+        if (state)
+          state->on_lobby_joined(*ev);
+      }));
+
+  handlers.push_back(app_state->event_bus->register_handler<immer::box<events::LeaveLobbyEvent>>(
+      [state](const immer::box<events::LeaveLobbyEvent> &ev) {
+        if (state)
+          state->on_lobby_left(*ev);
       }));
 
   // Subscribe to sink-input events and do an initial scan
@@ -108,8 +137,53 @@ void PulseAudioRouterState::on_container_stopped(const events::DockerContainerSt
   }
 }
 
+void PulseAudioRouterState::on_lobby_joined(const events::JoinLobbyEvent &ev) {
+  if (ev.lobby_id.empty())
+    return;
+
+  const auto session_id = std::to_string(ev.moonlight_session_id);
+  lobby_to_moonlight_session.update([&](auto m) { return m.set(ev.lobby_id, session_id); });
+  logs::log(logs::debug, "[SCEPAD_AUDIO] Map lobby '{}' to Moonlight session '{}'", ev.lobby_id, session_id);
+
+  // A Moonlight reconnect leaves the game and its quad Wwise stream alive,
+  // but recreates the numeric control session.  Pulse only reports a sink
+  // input when it is created or changed, so do not wait for another report:
+  // rebind the already-associated lobby stream now.
+  if (scepad_lobby_id == ev.lobby_id) {
+    scepad_session_id = session_id;
+    scepad_pcm.clear();
+    scepad_haptics_active = false;
+    logs::log(logs::info,
+              "[SCEPAD_AUDIO] Rebound existing quad stream for lobby '{}' to reconnected Moonlight session '{}'",
+              ev.lobby_id,
+              session_id);
+  }
+}
+
+void PulseAudioRouterState::on_lobby_left(const events::LeaveLobbyEvent &ev) {
+  if (ev.lobby_id.empty())
+    return;
+
+  const auto session_id = std::to_string(ev.moonlight_session_id);
+  lobby_to_moonlight_session.update([&](auto m) {
+    if (auto mapped_session = m.find(ev.lobby_id); mapped_session && *mapped_session == session_id)
+      return m.erase(ev.lobby_id);
+    return m;
+  });
+
+  if (scepad_session_id == session_id || scepad_lobby_id == ev.lobby_id) {
+    scepad_session_id.clear();
+    scepad_pcm.clear();
+    scepad_haptics_active = false;
+  }
+  logs::log(logs::debug,
+            "[SCEPAD_AUDIO] Remove lobby '{}' mapping for Moonlight session '{}'",
+            ev.lobby_id,
+            session_id);
+}
+
 // resolve sink name to sink index
-void PulseAudioRouterState::pa_sink_info_cb(pa_context * /*c*/, const pa_sink_info *info, int eol, void *userdata) {
+void PulseAudioRouterState::pa_sink_info_cb(pa_context *c, const pa_sink_info *info, int eol, void *userdata) {
   if (eol != 0 || !info)
     return;
   auto *self = static_cast<PulseAudioRouterState *>(userdata);
@@ -119,6 +193,13 @@ void PulseAudioRouterState::pa_sink_info_cb(pa_context * /*c*/, const pa_sink_in
   if (!info->name)
     return;
   std::string_view name{info->name};
+
+  if (name == SCEPAD_SINK_NAME) {
+    self->scepad_sink_idx = info->index;
+    self->start_scepad_monitor_(c);
+    logs::log(logs::info, "[SCEPAD_AUDIO] Found quad haptic sink '{}' idx={}", info->name, info->index);
+    return;
+  }
 
   // Prefix match
   if (!name.starts_with(VIRTUAL_SINK_PREFIX))
@@ -234,6 +315,26 @@ void PulseAudioRouterState::route_sink_input_(pa_context *c, const pa_sink_input
   if (!session_id || session_id->empty())
     return;
 
+  // The controller's own quad endpoint must stay separate from the desktop
+  // stream.  A game runner is keyed by a lobby UUID, so resolve it to the
+  // numeric session used by the Moonlight control channel before forwarding.
+  if (info->sink == scepad_sink_idx) {
+    std::string output_session_id = *session_id;
+    scepad_lobby_id = output_session_id;
+    {
+      auto lobby_sessions = lobby_to_moonlight_session.load();
+      if (auto mapped_session = lobby_sessions->find(output_session_id))
+        output_session_id = *mapped_session;
+    }
+    scepad_session_id = std::move(output_session_id);
+    logs::log(logs::debug,
+              "[SCEPAD_AUDIO] Associate quad stream {} host='{}' with Moonlight session '{}'",
+              info->index,
+              host,
+              scepad_session_id);
+    return;
+  }
+
   // session_id -> sink index
   std::optional<uint32_t> target_sink_idx;
   {
@@ -261,6 +362,94 @@ void PulseAudioRouterState::route_sink_input_(pa_context *c, const pa_sink_input
             host,
             *session_id,
             *target_sink_idx);
+}
+
+void PulseAudioRouterState::start_scepad_monitor_(pa_context *c) {
+  if (scepad_monitor)
+    return;
+
+  pa_sample_spec spec{};
+  spec.format = PA_SAMPLE_FLOAT32LE;
+  spec.rate = SCEPAD_INPUT_RATE;
+  spec.channels = 4;
+  if (!pa_sample_spec_valid(&spec)) {
+    logs::log(logs::error, "[SCEPAD_AUDIO] invalid monitor sample specification");
+    return;
+  }
+  pa_channel_map map{};
+  pa_channel_map_init(&map);
+  map.channels = spec.channels;
+  map.map[0] = PA_CHANNEL_POSITION_FRONT_LEFT;
+  map.map[1] = PA_CHANNEL_POSITION_FRONT_RIGHT;
+  map.map[2] = PA_CHANNEL_POSITION_REAR_LEFT;
+  map.map[3] = PA_CHANNEL_POSITION_REAR_RIGHT;
+  auto *stream = pa_stream_new(c, "Wolf DualSense ScePad haptic forwarder", &spec, &map);
+  if (!stream) {
+    logs::log(logs::error, "[SCEPAD_AUDIO] could not create Pulse monitor stream");
+    return;
+  }
+  pa_stream_set_read_callback(stream, &PulseAudioRouterState::pa_scepad_read_cb, this);
+  pa_buffer_attr attr{};
+  attr.maxlength = static_cast<uint32_t>(-1);
+  attr.fragsize = 16 * 4 * SCEPAD_PACKET_FRAMES;
+  if (pa_stream_connect_record(stream,
+                               "control_dualsense_audio.monitor",
+                               &attr,
+                               static_cast<pa_stream_flags_t>(PA_STREAM_ADJUST_LATENCY)) < 0) {
+    logs::log(logs::error, "[SCEPAD_AUDIO] cannot monitor quad sink: {}", pa_strerror(pa_context_errno(c)));
+    pa_stream_unref(stream);
+    return;
+  }
+  scepad_monitor = stream;
+  logs::log(logs::info, "[SCEPAD_AUDIO] monitoring rear channels from control_dualsense_audio.monitor");
+}
+
+void PulseAudioRouterState::pa_scepad_read_cb(pa_stream *stream, size_t /*length*/, void *userdata) {
+  auto *self = static_cast<PulseAudioRouterState *>(userdata);
+  if (!self)
+    return;
+  const void *data = nullptr;
+  size_t bytes = 0;
+  while (pa_stream_peek(stream, &data, &bytes) == 0 && bytes > 0) {
+    if (data)
+      self->consume_scepad_pcm_(static_cast<const float *>(data), bytes / (sizeof(float) * 4));
+    pa_stream_drop(stream);
+    data = nullptr;
+    bytes = 0;
+  }
+}
+
+void PulseAudioRouterState::consume_scepad_pcm_(const float *samples, size_t frames) {
+  if (scepad_session_id.empty() || !samples)
+    return;
+  scepad_pcm.insert(scepad_pcm.end(), samples, samples + frames * 4);
+
+  constexpr size_t input_frames_per_packet = SCEPAD_PACKET_FRAMES * SCEPAD_DECIMATION;
+  while (scepad_pcm.size() >= input_frames_per_packet * 4) {
+    std::array<std::int8_t, 64> packet{};
+    for (size_t frame = 0; frame < SCEPAD_PACKET_FRAMES; ++frame) {
+      const auto input_frame = frame * SCEPAD_DECIMATION;
+      // USB DualSense: FL/FR are its speaker; RL/RR are the two haptic coils.
+      packet[frame * 2] = float_to_s8(scepad_pcm[input_frame * 4 + 2]);
+      packet[frame * 2 + 1] = float_to_s8(scepad_pcm[input_frame * 4 + 3]);
+    }
+    const bool active = std::any_of(packet.begin(), packet.end(), [](std::int8_t sample) { return sample != 0; });
+    // The null sink continuously supplies silence.  Forward nonzero haptic
+    // PCM and exactly one following silent frame, rather than generating
+    // 93 encrypted no-op control packets per second while a game is idle.
+    if (active || scepad_haptics_active) {
+      control::queue_dualsense_haptic_audio(scepad_session_id, packet);
+      ++scepad_packets_forwarded;
+      if (active && (!scepad_haptics_active || scepad_packets_forwarded % 64 == 1)) {
+        logs::log(logs::debug,
+                  "[SCEPAD_AUDIO] forwarding nonzero rear-channel PCM packet {} for session {}",
+                  scepad_packets_forwarded,
+                  scepad_session_id);
+      }
+    }
+    scepad_haptics_active = active;
+    scepad_pcm.erase(scepad_pcm.begin(), scepad_pcm.begin() + input_frames_per_packet * 4);
+  }
 }
 
 } // namespace wolf::core::audio

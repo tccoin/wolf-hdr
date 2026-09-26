@@ -38,10 +38,12 @@ struct GenericErrorResponse {
 struct RuntimeSettingsResponse {
   bool success = true;
   int single_player_disconnect_grace_seconds = 10 * 60;
+  int hdr_peak_nits = 1000;
 };
 
 struct UpdateRuntimeSettingsRequest {
   std::optional<int> single_player_disconnect_grace_seconds;
+  std::optional<int> hdr_peak_nits;
 };
 
 struct PendingPairRequestsResponse {

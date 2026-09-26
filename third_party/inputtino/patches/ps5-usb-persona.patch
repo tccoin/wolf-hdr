@@ -1,0 +1,9 @@
+diff --git a/src/uhid/joypad_ps5.cpp b/src/uhid/joypad_ps5.cpp
+index 038554e..f72a99c 100644
+--- a/src/uhid/joypad_ps5.cpp
++++ b/src/uhid/joypad_ps5.cpp
+@@ -250,3 +250,3 @@
+-  bool use_bluetooth = true; // TODO: expose this
++  bool use_bluetooth = false;
+ 
+   auto def = uhid::DeviceDefinition{
